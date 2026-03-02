@@ -78,7 +78,7 @@ Git serves as a valuable tool for collaborative teamwork. To seamlessly access t
 
 1. Initiate the process by creating a private **empty** repository for your group, `<my_group_repo>`, on Github. Ensure that it **does not** include `README.md` and `.gitignore`.
 1. Clone your group remote repository locally using the command: `git clone https://github.com/<my_group_repo>`.
-1. Establish the course repository, iapr, as a remote repository by executing the command: `git remote add upstream https://github.com/LTS5/iapr2025.git` (or use the SSH variant if preferred).
+1. Establish the course repository, iapr, as a remote repository by executing the command: `git remote add upstream https://github.com/LTS5/iapr2026.git` (or use the SSH variant if preferred).
 1. Stay up-to-date by fetching and merging changes from the iapr repository into your local branch with: `git pull upstream main`.
 1. Once you've collected the code, push it to your remote repository: `git push origin main`.
 
