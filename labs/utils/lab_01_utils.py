@@ -359,3 +359,50 @@ def plot_results(
     axes[2].set_title("Mucin detection (area: {:.0f})".format(area_mucin))
     plt.tight_layout()
 
+# custom definitons for ex02
+
+def show_seeds_and_labels(seeds, labels):
+    # Load image
+    path_he2 = "../data/data_lab_01/tcga_blood.png"
+
+    # Check if folder and image exist
+    assert os.path.exists(path_he2), "Image not found, please check directory structure"
+
+    img_he2 = np.array(Image.open(path_he2))
+
+    # Display image
+    plt.figure(figsize=(14, 7))
+    plt.imshow(img_he2)
+    plt.axis('off')
+
+    h, w = img_he2.shape[:2]
+
+    # Allow annotations outside image
+    plt.xlim(0, w + 280)
+
+    ann = dict(
+        arrowprops=dict(arrowstyle='-|>', color='black', lw=2, shrinkA=0, shrinkB=0),
+        ha='left',
+        va='center',
+        annotation_clip=False
+    )
+
+    label_x = w + 40
+
+    # Plot seeds and annotations
+    for (row, col), label in zip(seeds, labels):
+
+        # Plot seed point
+        plt.scatter(col, row, c='red', s=50)
+
+        # Annotate
+        plt.annotate(
+            label,
+            xy=(col, row),
+            xytext=(label_x, row),
+            **ann
+        )
+
+    plt.tight_layout()
+
+    return img_he2
