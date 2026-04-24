@@ -1,0 +1,7 @@
+Project/data/
+*.jpg
+*.zip
+*.pt
+*.pth
+outputs/
+runs/
