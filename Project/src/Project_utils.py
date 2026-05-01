@@ -6,6 +6,7 @@ from typing import Callable
 from datetime import datetime
 
 
+
 # Plot color space distribution 
 def plot_thresholded_image(
     img: np.ndarray,
@@ -87,3 +88,38 @@ def plot_colors_histo(
         
     plt.tight_layout()
 
+
+def plot_images(
+    imgs: np.ndarray,
+    sizes: list[int],
+    title: str,
+):
+
+    D = len(imgs)
+    ncols = int(np.ceil(D/2))
+    _, axes = plt.subplots(nrows=2, ncols=ncols, figsize=(10, 4*ncols))
+    
+    # Remove axis
+    axes = axes.ravel()
+    [ax.axis('off') for ax in axes]
+    
+    for i in range(D):
+        axes[i].imshow(imgs[i])
+        axes[i].set_title("Size: {}".format(sizes[i]))
+    
+    plt.suptitle(title)
+    plt.tight_layout()
+
+def plot_close_open(img_th, apply_closing, apply_opening):
+    disk_sizes = [1, 2, 5, 10]
+    imgs_closing = []
+    imgs_opening = []
+
+    # Apply opening and closing to masked image 
+    for d in disk_sizes:
+        imgs_closing.append(apply_closing(img_th, d))
+        imgs_opening.append(apply_opening(img_th, d))
+
+    # Plot
+    plot_images(imgs=imgs_closing, sizes=disk_sizes, title="Closing")
+    plot_images(imgs=imgs_opening, sizes=disk_sizes, title="Opening")
