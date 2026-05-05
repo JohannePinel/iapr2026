@@ -7,3 +7,4 @@ outputs/
 runs/
 clean_env/
 requirements.txt
+data/
