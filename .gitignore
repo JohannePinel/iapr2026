@@ -5,3 +5,5 @@ Project/data/
 *.pth
 outputs/
 runs/
+clean_env/
+requirements.txt
