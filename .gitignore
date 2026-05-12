@@ -6,5 +6,9 @@ Project/data/
 outputs/
 runs/
 clean_env/
+Project/data/
+logs/
+labs/   
+*.log
+*.csv
 requirements.txt
-data/
