@@ -3,5 +3,13 @@ Project/data/
 *.zip
 *.pt
 *.pth
+*.png
 outputs/
 runs/
+clean_env/
+Project/data/
+logs/
+labs/   
+*.log
+*.csv
+requirements.txt
