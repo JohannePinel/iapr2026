@@ -23,7 +23,9 @@ import cv2
 from PIL import Image
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
-from mask_cleanup import clean_mask
+
+from mask_cleanup import clean_mask, sobel_edges
+from descriptors import plot_tile_descriptors
 
 
 # --------------------------------------------------------------------------
@@ -78,32 +80,45 @@ def compute_tile_positions(width, height, tile_size, stride):
 # Main entry point
 # --------------------------------------------------------------------------
 def tile_image(image_path, tile_size=75, overlap=1.0 / 3.0,
-               sat_max=40, val_min=180, whiteness_keep_frac=0.10,
-               n_samples=20, seed=42, outdir=None, save_source="original"):
+               sat_max=40, val_min=180, edge_keep_frac=0.03, edge_thresh=40,
+               n_samples=20, seed=42, outdir=None, save_source="sobel",
+               fd_length=11):
     """
     Run the masked sliding-window tiling pipeline on a single image.
 
+    Mask chain:  white-background mask  ->  clean_mask (speckle + contour
+    smoothing)  ->  sobel_edges (edges only).
+
+    Both the empty-tile discard test and the Fourier-descriptor contour are
+    computed on the SOBEL-EDGE tiles: a tile is kept only if a sufficient
+    fraction of its Sobel tile is edge pixels. This drops tiles that are
+    plain black in the Sobel map -- i.e. uniform card interior or pure
+    background -- which the old cleaned-mask test let through.
+
     Args:
-        image_path:          path to input image
-        tile_size:           square window size in px
-        overlap:             fractional window overlap in [0, 1)
-        sat_max:             HSV saturation below this -> candidate background
-        val_min:             HSV value above this -> candidate background
-        whiteness_keep_frac: keep a tile if mean(mask tile) >= frac * 255
-        n_samples:           number of sample tiles to visualize
-        seed:                RNG seed for reproducible sampling
-        outdir:              output directory (created if missing)
-        save_source:         "original" saves the RGB crop (recommended for
-                             downstream identification); "masked" saves the
-                             binary-mask crop instead.
+        image_path:     path to input image
+        tile_size:      square window size in px
+        overlap:        fractional window overlap in [0, 1)
+        sat_max:        HSV saturation below this -> candidate background
+        val_min:        HSV value above this -> candidate background
+        edge_thresh:    Sobel intensity above which a pixel counts as an edge
+        edge_keep_frac: keep a tile if (fraction of edge pixels in its Sobel
+                        tile) >= edge_keep_frac
+        n_samples:      number of sample tiles to visualize
+        seed:           RNG seed for reproducible sampling
+        outdir:         output directory (created if missing)
+        save_source:    which crop to save per tile -- "sobel" (Sobel edge
+                        map, default), "clean", "masked" or "original".
+        fd_length:      n_samples for the padded Fourier descriptors.
 
     Returns:
-        dict with output paths, tile lists, and kept/discarded counts.
+        dict with output paths, tile lists, kept/discarded counts, and the
+        complex Fourier descriptor array for the sampled tiles.
     """
     if not (0.0 <= overlap < 1.0):
         raise ValueError("overlap must be in [0, 1)")
-    if save_source not in ("original", "masked"):
-        raise ValueError("save_source must be 'original' or 'masked'")
+    if save_source not in ("sobel", "clean", "masked", "original"):
+        raise ValueError("save_source must be 'sobel', 'clean', 'masked' or 'original'")
     stride = max(1, round(tile_size * (1.0 - overlap)))
 
     # ---- load image ----
@@ -111,11 +126,12 @@ def tile_image(image_path, tile_size=75, overlap=1.0 / 3.0,
     img_rgb = np.asarray(img)
     height, width = img_rgb.shape[:2]
 
-    # ---- 1. mask out white-ish background ----
-    mask = mask_white_background(img_rgb, sat_max, val_min)
-    mask = clean_mask(mask)
+    # ---- 1. mask chain: white-bg mask -> cleaned mask -> Sobel edge map ----
+    mask_raw = mask_white_background(img_rgb, sat_max, val_min)
+    mask_clean = clean_mask(mask_raw)               # speckle removal + smoothing
+    mask_edges = sobel_edges(mask_clean)            # edges only ("sobeled" mask)
 
-    # ---- 2. tile geometry over the masked image ----
+    # ---- 2. tile geometry ----
     tiles, n_cols, n_rows = compute_tile_positions(width, height, tile_size, stride)
     n_tiles = len(tiles)
 
@@ -126,21 +142,23 @@ def tile_image(image_path, tile_size=75, overlap=1.0 / 3.0,
     os.makedirs(tiles_dir, exist_ok=True)
 
     # ---- 3. traverse tiles, apply discard condition, save kept tiles ----
-    keep_threshold = whiteness_keep_frac * 255.0
+    # Discard is decided on the SOBEL-EDGE tile: keep a tile only if a
+    # sufficient fraction of it is edge pixels. A tile that is uniform card
+    # interior (or pure background) has a near-black Sobel tile and is
+    # dropped -- which is what the cleaned-mask "mean whiteness" test missed.
+    crop_source = {"sobel": mask_edges, "clean": mask_clean,
+                   "masked": mask_raw, "original": img_rgb}[save_source]
     kept, discarded = [], []
     for idx, (x, y, w, h) in enumerate(tiles):
-        mask_tile = mask[y:y + h, x:x + w]
-        avg_whiteness = float(mask_tile.mean())
-        if avg_whiteness < keep_threshold:
+        edge_tile = mask_edges[y:y + h, x:x + w]
+        edge_frac = float((edge_tile > edge_thresh).mean())
+        if edge_frac < edge_keep_frac:
             discarded.append(idx)
             continue
         kept.append(idx)
         # naming convention: tile_<imagename>_<index>
         fname = f"tile_{stem}_{idx:05d}.png"
-        if save_source == "original":
-            crop = img_rgb[y:y + h, x:x + w]
-        else:  # "masked"
-            crop = mask_tile
+        crop = crop_source[y:y + h, x:x + w]
         Image.fromarray(crop).save(os.path.join(tiles_dir, fname))
 
     n_kept, n_discarded = len(kept), len(discarded)
@@ -151,13 +169,19 @@ def tile_image(image_path, tile_size=75, overlap=1.0 / 3.0,
     print(f"overlap / stride : {overlap:.4f} -> {stride} px")
     print(f"grid             : {n_cols} cols x {n_rows} rows = {n_tiles} tiles")
     print(f"mask thresholds  : S < {sat_max}, V > {val_min} flagged as background")
-    print(f"discard threshold: mean whiteness < {keep_threshold:.1f} (= {whiteness_keep_frac:.0%} of 255)")
-    print(f"kept / discarded : {n_kept} kept, {n_discarded} discarded")
+    print(f"mask chain       : raw -> clean_mask -> sobel_edges")
+    print(f"discard rule     : edge-pixel fraction (Sobel > {edge_thresh}) < {edge_keep_frac:.0%}")
+    print(f"kept / discarded : {n_kept} kept, {n_discarded} discarded, "
+          f"ratio {n_kept / max(1, n_kept + n_discarded):.3f}")
     print(f"tiles saved to   : {tiles_dir}/  (source: {save_source})")
 
-    # ---- output 0: the masking result ----
-    mask_path = os.path.join(outdir, f"{stem}_mask.png")
-    Image.fromarray(mask).save(mask_path)
+    # ---- output 0: the mask chain (raw, cleaned, Sobel edges) ----
+    mask_raw_path = os.path.join(outdir, f"{stem}_mask_raw.png")
+    mask_clean_path = os.path.join(outdir, f"{stem}_mask_clean.png")
+    mask_path = os.path.join(outdir, f"{stem}_mask.png")  # the Sobel edge map
+    Image.fromarray(mask_raw).save(mask_raw_path)
+    Image.fromarray(mask_clean).save(mask_clean_path)
+    Image.fromarray(mask_edges).save(mask_path)
 
     # ---- output 1: original image with the tiling ----
     fig, ax = plt.subplots(figsize=(width / 100, height / 100), dpi=150)
@@ -182,23 +206,14 @@ def tile_image(image_path, tile_size=75, overlap=1.0 / 3.0,
     k = min(n_samples, n_kept)
     sample_idx = sorted(rng.sample(kept, k)) if k > 0 else []
 
-    # ---- output 2: montage of sample tiles (thresholded / masked) ----
-    cols = 5
-    rows = max(1, (k + cols - 1) // cols)
-    fig, axes = plt.subplots(rows, cols, figsize=(cols * 1.8, rows * 1.8))
-    axes = np.array(axes).reshape(-1)
-    for ax in axes:
-        ax.axis("off")
-    for slot, idx in enumerate(sample_idx):
-        x, y, w, h = tiles[idx]
-        # thresholded view: the binary mask crop, not the RGB crop
-        axes[slot].imshow(mask[y:y + h, x:x + w], cmap="gray", vmin=0, vmax=255)
-        axes[slot].set_title(f"#{idx}\n(x={x}, y={y})", fontsize=7)
-    fig.suptitle(f"{k} sample tiles (thresholded, from {n_kept} kept)")
-    fig.tight_layout()
-    samples_path = os.path.join(outdir, f"{stem}_samples.png")
-    fig.savefig(samples_path, dpi=150)
-    plt.close(fig)
+    # ---- output 2: padded Fourier descriptors for the sampled tiles ----
+    # contour + descriptor are taken from the SOBEL-edge tiles (binarised at
+    # edge_thresh), consistent with the keep test and the saved tiles.
+    samples_path = os.path.join(outdir, f"{stem}_descriptors.png")
+    descriptors = plot_tile_descriptors(
+        img_rgb, tiles, sample_idx, mask_edges,
+        n_samples=fd_length, edge_thresh=edge_thresh, out_path=samples_path,
+    )
 
     # ---- output 3: sample tile positions on the original ----
     fig, ax = plt.subplots(figsize=(width / 100, height / 100), dpi=150)
@@ -220,19 +235,26 @@ def tile_image(image_path, tile_size=75, overlap=1.0 / 3.0,
     plt.close(fig)
 
     print("\nwrote:")
-    print(f"  {mask_path}")
+    print(f"  {mask_raw_path}")
+    print(f"  {mask_clean_path}")
+    print(f"  {mask_path}  (Sobel edge map)")
     print(f"  {grid_path}")
-    print(f"  {samples_path}")
+    print(f"  {samples_path}  (Fourier descriptors)")
     print(f"  {map_path}")
-    print(f"  {tiles_dir}/  ({n_kept} tile images)")
+    print(f"  {tiles_dir}/  ({n_kept} tile images, source: {save_source})")
 
     return {
-        "mask": mask,
+        "mask_raw": mask_raw,
+        "mask_clean": mask_clean,
+        "mask_edges": mask_edges,
+        "mask_raw_path": mask_raw_path,
+        "mask_clean_path": mask_clean_path,
         "mask_path": mask_path,
         "grid_path": grid_path,
         "samples_path": samples_path,
         "map_path": map_path,
         "tiles_dir": tiles_dir,
+        "descriptors": descriptors,
         "n_tiles": n_tiles,
         "n_kept": n_kept,
         "n_discarded": n_discarded,

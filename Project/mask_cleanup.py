@@ -110,6 +110,31 @@ def largest_contours(mask, min_area=20):
     return sorted(cnts, key=cv2.contourArea, reverse=True)
 
 
+def sobel_edges(mask, ksize=3):
+    """
+    Sobel gradient magnitude of a (binary) mask -> an "edges only" image.
+
+    On a clean binary mask the Sobel response is bright exactly on the
+    region boundaries and ~0 everywhere else, so the result is the edge
+    map of the mask. Output is uint8, normalised to 0..255.
+
+    Args:
+        mask:  uint8 array (expected 0 / 255, but any single-channel works)
+        ksize: Sobel kernel size (3 is appropriate for 75 px tiles)
+
+    Returns:
+        uint8 array, same shape as input, 0..255.
+    """
+    f = mask.astype(np.float32)
+    gx = cv2.Sobel(f, cv2.CV_32F, 1, 0, ksize=ksize)
+    gy = cv2.Sobel(f, cv2.CV_32F, 0, 1, ksize=ksize)
+    mag = cv2.magnitude(gx, gy)
+    peak = float(mag.max())
+    if peak > 0:
+        mag = mag / peak * 255.0
+    return mag.astype(np.uint8)
+
+
 # --------------------------------------------------------------------------
 # Demo: stage-by-stage on the uploaded tiles
 # --------------------------------------------------------------------------
