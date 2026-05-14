@@ -3,6 +3,7 @@ Project/data/
 *.zip
 *.pt
 *.pth
+*.png
 outputs/
 runs/
 clean_env/

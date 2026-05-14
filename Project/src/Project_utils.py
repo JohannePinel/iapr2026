@@ -32,6 +32,7 @@ def plot_thresholded_image(
     [a.axis('off') for a in axes]
     plt.suptitle(title)
     plt.tight_layout()
+    plt.savefig(os.path.join("..", "Project/Rapport", "thresholded_image_{}.png".format(datetime.now().strftime("%Y%m%d_%H%M%S"))))
 
 
 # Plot color space distribution 
