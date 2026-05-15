@@ -83,6 +83,13 @@ def remove_objects(img_th, size):
 
     return img_obj
 
+def remove_holes(img_th, size):
+
+    img_holes = np.zeros_like(img_th)
+    img_holes = remove_small_holes(img_th, area_threshold=size)
+
+    return img_holes
+
 
 def apply_hsv_threshold_v2(img, mode="red"):
 
@@ -91,9 +98,9 @@ def apply_hsv_threshold_v2(img, mode="red"):
     data_h, data_s, data_v = extract_hsv_channels(img=img)
 
     if mode == "red":
-        h_min1, h_max1 = 0.0, 0.05 # car 2 pics
-        h_min2, h_max2 = 0.95, 1.0
-        s_min, s_max = 0.4, 1.0
+        h_min1, h_max1 = 0.0, 0.1 # car 2 pics
+        h_min2, h_max2 = 0.9, 1.0
+        s_min, s_max = 0.2, 1.0
         v_min, v_max = 0.3, 1.0
         img_th = (
             (((data_h >= h_min1) & (data_h <= h_max1)) | 
@@ -110,8 +117,8 @@ def apply_hsv_threshold_v2(img, mode="red"):
 
     if mode == "yellow":
         h_min, h_max = 0.06, 0.20
-        s_min, s_max = 0.2, 1.0
-        v_min, v_max = 0.9, 1.0
+        s_min, s_max = 0.4, 1.0
+        v_min, v_max = 0.7, 1.0
 
     if mode == "green":
         h_min, h_max = 0.22, 0.40
@@ -136,8 +143,9 @@ def find_area_by_type(
     mode: str = "red",
     visualize_hsv: bool = False,
     visualize_mask: bool = False,
-    disk_size: int = 2,
-    object_min_size: int = 30,
+    disk_size: int = 3,
+    min_size : int = 500,
+    
 ):
 
 
@@ -145,8 +153,9 @@ def find_area_by_type(
 
     out_mask = apply_closing(img_th, disk_size)
     out_mask = apply_opening(out_mask, disk_size)
-    out_mask = remove_small_objects(out_mask, min_size=object_min_size)
-
+    #out_mask = remove_small_objects(out_mask, min_size=object_min_size)
+    out_mask = remove_holes(out_mask, min_size)
+    print("test remove holes")
 
     return out_mask
 
