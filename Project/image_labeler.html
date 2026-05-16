@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tile Labeler</title>
+<style>
+  :root{
+    --bg:#0e0f12; --panel:#16181d; --panel-2:#1d2027; --line:#2a2e38;
+    --ink:#e8e6df; --mut:#8b8f9a; --accent:#d8ff3e; --accent-dim:#3a4216;
+    --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{background:var(--bg);color:var(--ink);font-family:var(--sans);
+    display:flex;flex-direction:column;overflow:hidden}
+
+  header{display:flex;align-items:center;gap:14px;padding:12px 20px;
+    border-bottom:1px solid var(--line);background:var(--panel)}
+  header h1{font-size:14px;letter-spacing:2.5px;font-weight:600;text-transform:uppercase}
+  header h1 span{color:var(--accent)}
+  .grow{flex:1}
+  .stat{font-family:var(--mono);font-size:12px;color:var(--mut)}
+  .stat b{color:var(--ink)}
+
+  button{font-family:var(--sans);cursor:pointer;border:1px solid var(--line);
+    background:var(--panel-2);color:var(--ink);border-radius:6px;
+    padding:7px 13px;font-size:12.5px;transition:.12s}
+  button:hover:not(:disabled){border-color:var(--accent);color:var(--accent)}
+  button:disabled{opacity:.35;cursor:not-allowed}
+  button.primary{background:var(--accent);color:#101200;border-color:var(--accent);font-weight:600}
+  button.primary:hover:not(:disabled){filter:brightness(1.1);color:#101200}
+
+  main{flex:1;display:flex;min-height:0}
+
+  /* viewer */
+  .viewer{flex:1;display:flex;flex-direction:column;align-items:center;
+    justify-content:center;position:relative;
+    background:
+      linear-gradient(var(--line) 1px,transparent 1px) 0 0/26px 26px,
+      linear-gradient(90deg,var(--line) 1px,transparent 1px) 0 0/26px 26px,
+      var(--bg)}
+  .stage{width:min(40vh,360px);height:min(40vh,360px);
+    border:1px solid var(--line);background:#000;display:flex;
+    align-items:center;justify-content:center;overflow:hidden;
+    box-shadow:0 24px 60px -20px #000}
+  .stage img{display:block;width:100%;height:100%;object-fit:contain;
+    image-rendering:pixelated}
+  .filemeta{margin-top:14px;font-family:var(--mono);font-size:12px;color:var(--mut);text-align:center}
+  .filemeta b{color:var(--ink)}
+  .curlabel{margin-top:6px;font-family:var(--mono);font-size:12px}
+  .curlabel.set{color:var(--accent)}
+  .curlabel.unset{color:var(--mut)}
+  .empty{text-align:center;color:var(--mut);font-family:var(--mono);font-size:13px;line-height:1.9}
+  .empty kbd{background:var(--panel-2);border:1px solid var(--line);
+    border-radius:4px;padding:1px 6px;color:var(--ink)}
+
+  /* sidebar */
+  .side{width:336px;border-left:1px solid var(--line);background:var(--panel);
+    display:flex;flex-direction:column}
+  .side h2{font-size:10.5px;letter-spacing:2px;text-transform:uppercase;
+    color:var(--mut);padding:14px 18px 8px}
+  .labels{flex:1;overflow-y:auto;padding:0 14px 14px;
+    display:grid;grid-template-columns:1fr 1fr;gap:6px;align-content:start}
+  .lbtn{display:flex;align-items:center;gap:7px;text-align:left;
+    padding:7px 9px;font-size:11.5px;min-width:0}
+  .lbtn .key{font-family:var(--mono);font-size:10px;width:17px;height:17px;
+    display:flex;align-items:center;justify-content:center;border-radius:4px;
+    background:var(--bg);border:1px solid var(--line);color:var(--mut);flex-shrink:0}
+  .lbtn .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .lbtn .ct{font-family:var(--mono);font-size:10px;color:var(--mut);flex-shrink:0}
+  .lbtn.active{border-color:var(--accent);background:var(--accent-dim)}
+  .lbtn.active .key{background:var(--accent);color:#101200;border-color:var(--accent)}
+  .lbtn.active .ct{color:var(--ink)}
+
+  .config{padding:12px 18px;border-top:1px solid var(--line)}
+  .config .chead{display:flex;align-items:center;gap:8px;cursor:pointer}
+  .config .chead label{font-size:10.5px;letter-spacing:1.5px;text-transform:uppercase;
+    color:var(--mut);flex:1;cursor:pointer}
+  .config .chead .tw{color:var(--mut);font-family:var(--mono);font-size:11px}
+  .config .note{font-size:11px;color:var(--mut);line-height:1.5;margin:8px 0}
+  textarea{width:100%;background:var(--bg);color:var(--ink);
+    border:1px solid var(--line);border-radius:6px;padding:8px;
+    font-family:var(--mono);font-size:11.5px;line-height:1.5;resize:vertical}
+  .config textarea{height:120px}
+  .config .row{display:flex;gap:6px;margin-top:8px}
+  .config .row button{flex:1}
+
+  footer{display:flex;align-items:center;gap:10px;padding:10px 20px;
+    border-top:1px solid var(--line);background:var(--panel)}
+  .bar{flex:1;height:6px;background:var(--panel-2);border-radius:3px;overflow:hidden}
+  .bar i{display:block;height:100%;width:0;background:var(--accent);transition:.2s}
+
+  /* modal */
+  .modal{position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:50;
+    display:flex;align-items:center;justify-content:center}
+  .sheet{width:560px;max-width:92vw;background:var(--panel);
+    border:1px solid var(--line);border-radius:10px;padding:18px;
+    display:flex;flex-direction:column;gap:12px;
+    box-shadow:0 30px 80px -20px #000}
+  .sheet-head{display:flex;align-items:center}
+  .sheet-head h3{font-size:12px;letter-spacing:2px;text-transform:uppercase;flex:1}
+  .sheet-head button{padding:3px 9px}
+  .sheet-hint{font-size:12px;color:var(--mut);line-height:1.55}
+  .sheet-hint code{background:var(--bg);border:1px solid var(--line);
+    border-radius:3px;padding:0 4px}
+  .sheet textarea{height:260px}
+  .sheet-actions{display:flex;gap:8px;align-items:center}
+  .toast{font-size:11.5px;color:var(--accent);font-family:var(--mono)}
+
+  .hide{display:none}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>TILE<span>&middot;</span>LABELER</h1>
+  <button id="openBtn" class="primary">Open folder</button>
+  <input id="folder" type="file" webkitdirectory multiple class="hide">
+  <div class="grow"></div>
+  <div class="stat">labeled <b id="done">0</b> / <b id="total">0</b></div>
+  <button id="importBtn">Import CSV</button>
+  <button id="exportBtn" disabled>Export CSV</button>
+</header>
+
+<main>
+  <section class="viewer">
+    <div id="stageWrap" class="hide">
+      <div class="stage"><img id="img" alt=""></div>
+      <div class="filemeta">tile <b id="idx">0</b> / <span id="cnt">0</span> &nbsp;&middot;&nbsp; <b id="fname">&mdash;</b></div>
+      <div id="curlabel" class="curlabel unset">unlabeled</div>
+    </div>
+    <div id="emptyMsg" class="empty">
+      Open a folder of images to begin.<br><br>
+      <kbd>1-9 0 A-Z</kbd> assign label &nbsp; <kbd>&larr;</kbd> prev &nbsp;
+      <kbd>&rarr;</kbd> next &nbsp; <kbd>Space</kbd> skip<br>
+      Labeling auto-advances to the next unlabeled tile.
+    </div>
+  </section>
+
+  <aside class="side">
+    <h2>Labels</h2>
+    <div id="labels" class="labels"></div>
+    <div class="config">
+      <div class="chead" id="cfgToggle">
+        <label>Label set</label>
+        <span class="tw" id="cfgTw">[ hide ]</span>
+      </div>
+      <div id="cfgBody">
+        <p class="note">Defines which buttons appear and their keyboard
+          shortcuts. Edit the list (one label per line) and press
+          <b>Apply</b> to relabel for any dataset.</p>
+        <textarea id="labelCfg">num_0
+num_1
+num_2
+num_3
+num_4
+num_5
+num_6
+num_7
+num_8
+num_9
+skip
+reverse
+draw_two
+wild
+wild_draw_four
+noise
+discard</textarea>
+        <div class="row"><button id="applyCfg">Apply labels</button></div>
+      </div>
+    </div>
+  </aside>
+</main>
+
+<footer>
+  <button id="prevBtn" disabled>&larr; Prev</button>
+  <button id="nextBtn" disabled>Next &rarr;</button>
+  <button id="skipBtn" disabled>Skip unlabeled</button>
+  <div class="bar"><i id="barFill"></i></div>
+  <div class="stat"><b id="pct">0</b>%</div>
+</footer>
+
+<!-- export / import modal -->
+<div id="modal" class="modal hide">
+  <div class="sheet">
+    <div class="sheet-head">
+      <h3 id="modalTitle">Export CSV</h3>
+      <button id="modalClose">&times;</button>
+    </div>
+    <p id="modalHint" class="sheet-hint"></p>
+    <textarea id="modalText" spellcheck="false"></textarea>
+    <input id="csvIn" type="file" accept=".csv,text/csv" class="hide">
+    <div class="sheet-actions">
+      <button id="modalFile" class="hide">Load .csv file&hellip;</button>
+      <span id="modalToast" class="toast"></span>
+      <div class="grow"></div>
+      <button id="modalCopy" class="hide">Copy to clipboard</button>
+      <button id="modalDownload" class="hide">Download file</button>
+      <button id="modalImport" class="hide primary">Import labels</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function(){
+  "use strict";
+  const IMG_RE=/\.(png|jpe?g|gif|webp|bmp)$/i;
+  const KEYS="1234567890QWERTYUIOPASDFGHJKLZXCVBNM".split("");
+  let images=[];      // {name, file}
+  let labels=[];      // label strings
+  let assigned={};    // name -> label
+  let cur=0;
+  const cache={};     // name -> data URL
+
+  const $=id=>document.getElementById(id);
+  const els={img:$("img"),idx:$("idx"),cnt:$("cnt"),fname:$("fname"),
+    curlabel:$("curlabel"),labels:$("labels"),done:$("done"),total:$("total"),
+    bar:$("barFill"),pct:$("pct"),stage:$("stageWrap"),empty:$("emptyMsg"),
+    modal:$("modal")};
+
+  /* ---------- labels ---------- */
+  function readLabels(){
+    labels=$("labelCfg").value.split(/[\n,]/).map(s=>s.trim()).filter(Boolean);
+    renderLabels();
+  }
+  function renderLabels(){
+    els.labels.innerHTML="";
+    const curName=images.length?assigned[images[cur].name]:null;
+    labels.forEach((lab,i)=>{
+      const key=KEYS[i]||"";
+      const count=Object.values(assigned).filter(v=>v===lab).length;
+      const b=document.createElement("button");
+      b.className="lbtn"+(lab===curName?" active":"");
+      b.title=lab;
+      b.innerHTML='<span class="key">'+key+'</span>'+
+                  '<span class="nm">'+lab+'</span>'+
+                  '<span class="ct">'+count+'</span>';
+      b.onclick=()=>assign(lab);
+      els.labels.appendChild(b);
+    });
+  }
+
+  /* ---------- viewer ---------- */
+  function show(){
+    if(!images.length){
+      els.stage.classList.add("hide");
+      els.empty.classList.remove("hide");
+      return;
+    }
+    els.empty.classList.add("hide");
+    els.stage.classList.remove("hide");
+    cur=Math.max(0,Math.min(cur,images.length-1));
+    const im=images[cur];
+    if(cache[im.name]){
+      els.img.src=cache[im.name];
+    }else{
+      els.img.removeAttribute("src");
+      const want=im.name;
+      const r=new FileReader();
+      r.onload=()=>{cache[want]=r.result;
+        if(images[cur]&&images[cur].name===want)els.img.src=r.result;};
+      r.onerror=()=>{if(images[cur]&&images[cur].name===want)
+        els.fname.textContent=want+"  (read error)";};
+      r.readAsDataURL(im.file);
+    }
+    els.fname.textContent=im.name;
+    els.idx.textContent=cur+1;
+    els.cnt.textContent=images.length;
+    const lab=assigned[im.name];
+    els.curlabel.textContent=lab?("\u2192 "+lab):"unlabeled";
+    els.curlabel.className="curlabel "+(lab?"set":"unset");
+    renderLabels();
+    updateProgress();
+    $("prevBtn").disabled=cur===0;
+    $("nextBtn").disabled=cur===images.length-1;
+  }
+  function updateProgress(){
+    const n=images.length;
+    const d=Object.keys(assigned).filter(k=>images.some(i=>i.name===k)).length;
+    els.done.textContent=d;
+    els.total.textContent=n;
+    const p=n?Math.round(d/n*100):0;
+    els.bar.style.width=p+"%";
+    els.pct.textContent=p;
+    $("exportBtn").disabled=n===0;
+  }
+  function assign(lab){
+    if(!images.length)return;
+    assigned[images[cur].name]=lab;
+    const nxt=nextUnlabeled();
+    if(nxt!==-1)cur=nxt; else if(cur<images.length-1)cur++;
+    show();
+  }
+  function nextUnlabeled(){
+    for(let i=cur+1;i<images.length;i++)
+      if(!assigned[images[i].name])return i;
+    for(let i=0;i<images.length;i++)
+      if(!assigned[images[i].name])return i;
+    return -1;
+  }
+  function loadFiles(fileList){
+    images=[...fileList]
+      .filter(f=>IMG_RE.test(f.name))
+      .sort((a,b)=>a.name.localeCompare(b.name,undefined,{numeric:true}))
+      .map(f=>({name:f.name,file:f}));
+    cur=0;
+    if(!images.length)alert("No image files found in that folder.");
+    show();
+  }
+
+  /* ---------- CSV ---------- */
+  function buildCSV(){
+    const rows=[["image_name","label"]];
+    images.forEach(im=>rows.push([im.name,assigned[im.name]||""]));
+    return rows.map(r=>r.map(c=>
+      /[",\n]/.test(c)?'"'+c.replace(/"/g,'""')+'"':c).join(",")).join("\r\n");
+  }
+  function parseCSV(text){
+    const lines=text.split(/\r?\n/).filter(l=>l.trim());
+    let n=0;
+    lines.slice(1).forEach(line=>{
+      const m=line.match(/^("(?:[^"]|"")*"|[^,]*),(.*)$/);
+      if(!m)return;
+      const name=m[1].replace(/^"|"$/g,"").replace(/""/g,'"').trim();
+      const lab=m[2].replace(/^"|"$/g,"").replace(/""/g,'"').trim();
+      if(name&&lab){assigned[name]=lab;n++;}
+    });
+    return n;
+  }
+
+  /* ---------- modal ---------- */
+  function openModal(mode){
+    const isExp=mode==="export";
+    $("modalTitle").textContent=isExp?"Export CSV":"Import CSV";
+    $("modalHint").innerHTML=isExp
+      ? "Your labels as CSV. <b>Select all &amp; copy</b> (or use the buttons "+
+        "below) and save it as <code>labels.csv</code>. Copy/paste always "+
+        "works even when file downloads are blocked by the browser."
+      : "Paste CSV text below (or load a .csv file), then press "+
+        "<b>Import labels</b>. Rows are matched to images by filename; "+
+        "the header row is ignored.";
+    $("modalText").value=isExp?buildCSV():"";
+    $("modalText").readOnly=isExp;
+    $("modalToast").textContent="";
+    $("modalCopy").classList.toggle("hide",!isExp);
+    $("modalDownload").classList.toggle("hide",!isExp);
+    $("modalFile").classList.toggle("hide",isExp);
+    $("modalImport").classList.toggle("hide",isExp);
+    els.modal.classList.remove("hide");
+    if(isExp){$("modalText").focus();$("modalText").select();}
+  }
+  function closeModal(){els.modal.classList.add("hide");}
+  function toast(msg){$("modalToast").textContent=msg;}
+
+  function doCopy(){
+    const ta=$("modalText");
+    ta.focus();ta.select();
+    let ok=false;
+    try{ok=document.execCommand("copy");}catch(e){}
+    if(ok){toast("Copied to clipboard.");return;}
+    if(navigator.clipboard&&navigator.clipboard.writeText){
+      navigator.clipboard.writeText(ta.value)
+        .then(()=>toast("Copied to clipboard."))
+        .catch(()=>toast("Copy blocked \u2014 select the text and copy manually."));
+    }else{
+      toast("Copy blocked \u2014 select the text and copy manually.");
+    }
+  }
+  function doDownload(){
+    try{
+      const csv=$("modalText").value;
+      // base64-encode; unescape(encodeURIComponent()) makes UTF-8 safe for btoa
+      const b64=btoa(unescape(encodeURIComponent(csv)));
+      const a=document.createElement("a");
+      a.href="data:text/csv;base64,"+b64;
+      a.download="labels.csv";
+      document.body.appendChild(a);a.click();a.remove();
+      toast("Download triggered. If nothing saved, use Copy instead.");
+    }catch(e){
+      toast("Download blocked here \u2014 use Copy to clipboard.");
+    }
+  }
+  function doImport(){
+    const n=parseCSV($("modalText").value);
+    show();
+    closeModal();
+    alert(n+" label(s) imported and matched by filename.");
+  }
+
+  /* ---------- events ---------- */
+  $("openBtn").onclick=()=>$("folder").click();
+  $("folder").onchange=e=>loadFiles(e.target.files);
+  $("exportBtn").onclick=()=>openModal("export");
+  $("importBtn").onclick=()=>openModal("import");
+  $("modalClose").onclick=closeModal;
+  els.modal.onclick=e=>{if(e.target===els.modal)closeModal();};
+  $("modalCopy").onclick=doCopy;
+  $("modalDownload").onclick=doDownload;
+  $("modalImport").onclick=doImport;
+  $("modalFile").onclick=()=>$("csvIn").click();
+  $("csvIn").onchange=e=>{
+    const f=e.target.files[0];if(!f)return;
+    const r=new FileReader();
+    r.onload=()=>{$("modalText").value=r.result;toast("File loaded \u2014 press Import.");};
+    r.readAsText(f);
+  };
+  $("applyCfg").onclick=readLabels;
+  $("cfgToggle").onclick=()=>{
+    const hidden=$("cfgBody").classList.toggle("hide");
+    $("cfgTw").textContent=hidden?"[ show ]":"[ hide ]";
+  };
+  $("prevBtn").onclick=()=>{if(cur>0){cur--;show();}};
+  $("nextBtn").onclick=()=>{if(cur<images.length-1){cur++;show();}};
+  $("skipBtn").onclick=()=>{const n=nextUnlabeled();if(n!==-1){cur=n;show();}};
+
+  document.addEventListener("keydown",e=>{
+    if(!els.modal.classList.contains("hide")){
+      if(e.key==="Escape")closeModal();
+      return;
+    }
+    if(e.target.tagName==="TEXTAREA")return;
+    if(e.key==="ArrowLeft"){e.preventDefault();$("prevBtn").click();return;}
+    if(e.key==="ArrowRight"){e.preventDefault();$("nextBtn").click();return;}
+    if(e.key===" "){e.preventDefault();$("skipBtn").click();return;}
+    const i=KEYS.indexOf(e.key.toUpperCase());
+    if(i!==-1&&i<labels.length){e.preventDefault();assign(labels[i]);}
+  });
+
+  readLabels();
+  show();
+})();
+</script>
+</body>
+</html>
