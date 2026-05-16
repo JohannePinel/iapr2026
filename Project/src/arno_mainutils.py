@@ -142,4 +142,4 @@ def test_on_folder_contours(folder_path, output_csv='test_results.csv', output_f
     
     print(f"\nTest terminé!")
     
-    return df
+    return all_cards

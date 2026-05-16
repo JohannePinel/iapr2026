@@ -20,7 +20,7 @@ if __name__ == "__main__":
     )
     '''
     
-    test_on_folder_contours(
+    all_cards = test_on_folder_contours(
         folder_path=folder_path,
         output_csv=output_path_csv,
         output_folder=ouput_folder,
