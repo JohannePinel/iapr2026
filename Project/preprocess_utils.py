@@ -15,6 +15,9 @@ Pipeline (per image)
                                    frame-clipped contours  (contour_utils)
         -> tile_selection        : keep tiles with enough edge content
                                    ("symbol candidates")
+        -> rotation_translation_correction
+                                 : per-candidate rectification -- centre each
+                                   tile's contour and rotate it upright
 
 Every high-level step accepts ``show_plots: bool``. When True, the step emits
 a matplotlib diagnostic figure; when False it runs silently. Algorithms are
@@ -36,6 +39,8 @@ import cv2
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import numpy as np
+from scipy import ndimage
+
 from contour_utils import remove_noise_contours
 
 
@@ -78,9 +83,22 @@ DEFAULT_EDGE_KEEP_FRAC = 0.03    # keep a tile if its edge-pixel fraction
 # tile pixels count as "edge", so by default ``preprocess_image`` ties it to
 # DEFAULT_EDGE_THRESH to stay consistent with tile_selection.
 
+# --- rotation / translation correction (per-candidate rectification) ---
+# A kept tile's contour is centred (translation) and rotated upright by the
+# tilt of the line joining its top- and bottom-half centroids. `fg_threshold`
+# decides which pixels form that contour; like the noise stage it is tied to
+# DEFAULT_EDGE_THRESH by ``preprocess_image`` so every stage agrees on what an
+# edge pixel is. ``max_iter`` controls the orientation solver: 1 is a single
+# measure-and-rotate pass; >1 re-measures after each rotation (the equator
+# re-partitions the contour) and converges to a stable vertical, ``tol`` being
+# the residual-tilt stopping threshold in degrees.
+DEFAULT_RECTIFY_MAX_ITER = 15    # orientation-solver iterations (1 = single pass)
+DEFAULT_RECTIFY_TOL      = 0.5   # stop when residual tilt < this (degrees)
+
 # --- diagnostic panel sampling ---
 N_KEPT_PREVIEW      = 15
 N_DISCARDED_PREVIEW = 5
+N_RECTIFY_PREVIEW   = 10    # kept tiles shown before/after rectification
 DEFAULT_SEED        = 42
 
 
@@ -450,7 +468,209 @@ def tile_selection(
 
 
 # ============================================================================
-# 6. PIPELINE ORCHESTRATOR
+# 6. ROTATION / TRANSLATION CORRECTION (per-candidate rectification)
+# ============================================================================
+# Ported from the standalone ``rectify_tiles.py`` tool and folded into the
+# pipeline as a regular stage. The algorithm is unchanged; it is only
+# generalised so the foreground threshold is a parameter (the pipeline ties it
+# to the edge threshold) instead of a hard-coded constant, and so it operates
+# on in-memory tile crops instead of image files.
+#
+# Per tile:
+#   1. Threshold to a foreground (contour) mask, compute the contour centroid
+#      and translate the contour so the centroid lands on the tile centre.
+#   2. Split the centred contour at the horizontal mid-line ("equator") into a
+#      top and a bottom region and compute the contour centroid of each.
+#   3. Measure the tilt of the line joining the two half-centroids relative to
+#      vertical and rotate the contour by that angle so the line is vertical.
+
+def _fg_centroid(
+    img: np.ndarray,
+    fg_threshold: float,
+    region: np.ndarray | None = None,
+) -> Tuple[float, float]:
+    """``(cx, cy)`` centroid of the foreground pixels, optionally within a mask.
+
+    Args:
+        img: Single-channel tile (any numeric dtype).
+        fg_threshold: Pixels strictly above this intensity are foreground.
+        region: Optional boolean mask; when given, only foreground pixels
+            inside it are considered.
+
+    Returns:
+        The ``(x, y)`` centroid. Falls back to the geometric tile centre when
+        the (masked) foreground is empty.
+    """
+    fg = img > fg_threshold
+    if region is not None:
+        fg = fg & region
+    ys, xs = np.nonzero(fg)
+    if xs.size == 0:
+        h, w = img.shape
+        return (w - 1) / 2.0, (h - 1) / 2.0
+    return float(xs.mean()), float(ys.mean())
+
+
+def _center_contour(
+    img: np.ndarray, fg_threshold: float
+) -> Tuple[np.ndarray, Tuple[float, float]]:
+    """Step 1 -- translate the contour so its centroid sits at the tile centre.
+
+    Returns the centred image and the applied ``(tx, ty)`` offset. ``ndimage``
+    takes the shift in ``(row, col)`` = ``(y, x)`` order.
+    """
+    h, w = img.shape
+    cx, cy = _fg_centroid(img, fg_threshold)
+    tx = (w - 1) / 2.0 - cx
+    ty = (h - 1) / 2.0 - cy
+    centered = ndimage.shift(img, (ty, tx), order=1, mode="constant", cval=0.0)
+    return centered, (tx, ty)
+
+
+def _half_centroids(
+    img: np.ndarray, fg_threshold: float
+) -> Tuple[Tuple[float, float], Tuple[float, float], float]:
+    """Contour centroids of the top and bottom halves (split at the equator)."""
+    h, w = img.shape
+    equator = (h - 1) / 2.0
+    rows = np.arange(h)[:, None] * np.ones((1, w))
+    top_region = rows <= equator
+    bot_region = rows > equator
+    c_top = _fg_centroid(img, fg_threshold, top_region)
+    c_bot = _fg_centroid(img, fg_threshold, bot_region)
+    return c_top, c_bot, equator
+
+
+def _rectify_orientation(
+    img: np.ndarray, fg_threshold: float, max_iter: int, tol: float
+) -> Tuple[np.ndarray, float]:
+    """Steps 2-3 -- rotate so the top->bottom centroid line becomes vertical.
+
+    ``max_iter == 1`` is the single-pass method: measure the half-centroid
+    tilt once and rotate by it. ``max_iter > 1`` repeats the measurement (the
+    equator re-partitions the contour after each rotation) and converges to a
+    stable vertical, applying a single final rotation to avoid repeated
+    interpolation blur.
+
+    Returns the rotated image and the total applied rotation (degrees).
+    """
+    total = 0.0
+    for _ in range(max(1, max_iter)):
+        probe = (ndimage.rotate(img, total, reshape=False, order=1,
+                                mode="constant", cval=0.0)
+                 if total else img)
+        c_top, c_bot, _ = _half_centroids(probe, fg_threshold)
+        dx = c_top[0] - c_bot[0]
+        dy = c_top[1] - c_bot[1]                   # < 0 when top is above
+        angle = np.degrees(np.arctan2(dx, -dy))    # tilt away from vertical
+        total += angle
+        if abs(angle) < tol:
+            break
+    # One final rotation about the centre cancels the accumulated tilt.
+    rotated = ndimage.rotate(img, total, reshape=False, order=1,
+                             mode="constant", cval=0.0)
+    return rotated, total
+
+
+def _rectify_tile(
+    content: np.ndarray, fg_threshold: float, max_iter: int, tol: float
+) -> Tuple[np.ndarray, float, float, float]:
+    """Centre and upright a single tile crop.
+
+    The geometric ops run in floating point for interpolation accuracy; the
+    result is clipped back to the input's ``uint8`` ``[0, 255]`` range.
+
+    Returns:
+        ``(corrected_tile, tx, ty, angle)`` -- the rectified ``uint8`` tile,
+        the translation offset and the rotation (degrees) that were applied.
+    """
+    work = content.astype(np.float64)
+    centered, (tx, ty) = _center_contour(work, fg_threshold)
+    rotated, angle = _rectify_orientation(centered, fg_threshold, max_iter, tol)
+    corrected = np.clip(rotated, 0, 255).astype(np.uint8)
+    return corrected, tx, ty, angle
+
+
+def rotation_translation_correction(
+    symbol_candidates: List[Dict[str, Any]],
+    fg_threshold: int = DEFAULT_EDGE_THRESH,
+    max_iter: int = DEFAULT_RECTIFY_MAX_ITER,
+    tol: float = DEFAULT_RECTIFY_TOL,
+    seed: int = DEFAULT_SEED,
+    show_plots: bool = True,
+) -> List[Dict[str, Any]]:
+    """Rectify symbol-candidate tiles: centre and upright each tile's contour.
+
+    For every kept tile produced by :func:`tile_selection`, the tile's
+    ``content`` is translated so its contour centroid sits at the tile centre
+    and rotated so the contour stands upright (see the section header for the
+    algorithm). The rectified crop replaces ``content``; the pre-correction
+    crop is preserved under ``content_raw`` so the change can be visualised.
+
+    Args:
+        symbol_candidates: Kept-tile dicts from :func:`tile_selection`, each
+            carrying ``index, x, y, w, h, content, edge_fraction``.
+        fg_threshold: Pixel intensity above which a tile pixel is part of the
+            contour. Tied to the selection stage's ``edge_thresh`` by
+            :func:`preprocess_image` so all stages agree on edge pixels.
+        max_iter: Orientation-solver iterations (1 = single measure-and-rotate
+            pass; >1 re-measures and converges to a stable vertical).
+        tol: Residual-tilt stopping threshold for the solver, in degrees.
+        seed: RNG seed for the reproducible sample drawn into the diagnostic
+            panel.
+        show_plots: If True, render a side-by-side before/after panel for a
+            sample of up to :data:`N_RECTIFY_PREVIEW` rectified tiles.
+
+    Returns:
+        A new list of candidate dicts (same length and order as the input).
+        Each dict copies the original fields, replaces ``content`` with the
+        rectified ``uint8`` tile, and adds ``content_raw`` (the original crop),
+        ``shift`` (the ``(tx, ty)`` translation) and ``angle`` (the rotation,
+        in degrees).
+
+    Side effects:
+        Prints a summary to stdout. Renders a matplotlib figure when
+        ``show_plots`` is True and at least one candidate is present.
+    """
+    corrected: List[Dict[str, Any]] = []
+    for cand in symbol_candidates:
+        fixed, tx, ty, angle = _rectify_tile(
+            cand["content"], fg_threshold=fg_threshold,
+            max_iter=max_iter, tol=tol,
+        )
+        corrected.append({
+            **cand,
+            "content": fixed,
+            "content_raw": cand["content"],
+            "shift": (tx, ty),
+            "angle": angle,
+        })
+
+    # ---- console summary (always) ----
+    print("rotation_translation_correction")
+    print("-" * 50)
+    print(f"  parameters    : fg_threshold={fg_threshold}, "
+          f"max_iter={max_iter}, tol={tol}")
+    print(f"  rectified     : {len(corrected)} candidate tile(s)")
+    if corrected:
+        shift_mag = [float(np.hypot(*c["shift"])) for c in corrected]
+        ang = [abs(c["angle"]) for c in corrected]
+        print(f"  translation   : mean |offset| = {np.mean(shift_mag):.2f} px "
+              f"(max {np.max(shift_mag):.2f} px)")
+        print(f"  rotation      : mean |angle|  = {np.mean(ang):.2f} deg "
+              f"(max {np.max(ang):.2f} deg)")
+    print("-" * 50)
+
+    if show_plots and corrected:
+        _plot_rotation_translation_correction(
+            corrected, fg_threshold=fg_threshold, seed=seed,
+        )
+
+    return corrected
+
+
+# ============================================================================
+# 7. PIPELINE ORCHESTRATOR
 # ============================================================================
 # Which override keys belong to which stage. This is the single source of
 # truth for kwarg routing: `_split_overrides` reads it to fan a flat
@@ -466,6 +686,7 @@ _STAGE_PARAMS: Dict[str, List[str]] = {
     "tile":      ["tile_size", "overlap"],
     "noise":     ["min_pixels", "edge_margin", "fg_threshold"],
     "selection": ["edge_thresh", "edge_keep_frac", "seed"],
+    "rectify":   ["fg_threshold", "max_iter", "tol", "seed"],
 }
 
 
@@ -510,7 +731,9 @@ def _preprocess_one(
         show_plots: Propagated to every stage that renders a figure.
 
     Returns:
-        The image's ``symbol_candidates`` list (see :func:`tile_selection`).
+        The image's ``symbol_candidates`` list: the kept tiles from
+        :func:`tile_selection`, rectified (centred + uprighted) by
+        :func:`rotation_translation_correction`.
     """
     print(f"\n=== preprocess_image: {name} ===")
     mask    = apply_threshold(rgb,     show_plots=show_plots, **stage_kw["threshold"])
@@ -518,7 +741,10 @@ def _preprocess_one(
     edges   = keep_edges(cleaned,      show_plots=show_plots, **stage_kw["edges"])
     tiles   = tile_image(edges,                               **stage_kw["tile"])
     tiles   = remove_noise_contours(tiles,                    **stage_kw["noise"])
-    return tile_selection(tiles,       show_plots=show_plots, **stage_kw["selection"])
+    kept    = tile_selection(tiles,    show_plots=show_plots, **stage_kw["selection"])
+    candidates = rotation_translation_correction(
+        kept, show_plots=show_plots, **stage_kw["rectify"])
+    return candidates
 
 
 def preprocess_image(
@@ -530,7 +756,8 @@ def preprocess_image(
 
     For each image, applies the chain:
     ``apply_threshold -> apply_morphology -> keep_edges -> tile_image
-    -> remove_noise_contours -> tile_selection``. The ``show_plots`` flag is
+    -> remove_noise_contours -> tile_selection
+    -> rotation_translation_correction``. The ``show_plots`` flag is
     propagated to every stage.
 
     Note:
@@ -556,21 +783,23 @@ def preprocess_image(
 
     Returns:
         Mapping ``{filename: symbol_candidates}`` where ``symbol_candidates``
-        is the list returned by :func:`tile_selection` for that image.
+        is the list of rectified kept-tile dicts returned by
+        :func:`rotation_translation_correction` for that image.
 
     Side effects:
-        Renders matplotlib figures when ``show_plots`` is True. Always
-        prints per-image statistics from :func:`tile_selection`.
+        Renders matplotlib figures when ``show_plots`` is True. Always prints
+        per-image statistics from :func:`tile_selection` and
+        :func:`rotation_translation_correction`.
     """
     stage_kw = _split_overrides(overrides)
 
-    # Keep the noise step and tile_selection consistent: both decide what
-    # counts as an "edge" pixel. Unless the caller overrode `fg_threshold`,
-    # reuse the selection stage's `edge_thresh` for it.
-    stage_kw["noise"].setdefault(
-        "fg_threshold",
-        stage_kw["selection"].get("edge_thresh", DEFAULT_EDGE_THRESH),
-    )
+    # Keep the noise step, tile_selection and the rectification step
+    # consistent: all three decide what counts as an "edge" / foreground
+    # pixel. Unless the caller overrode `fg_threshold`, reuse the selection
+    # stage's `edge_thresh` for it in both stages that consume it.
+    edge_thresh = stage_kw["selection"].get("edge_thresh", DEFAULT_EDGE_THRESH)
+    stage_kw["noise"].setdefault("fg_threshold", edge_thresh)
+    stage_kw["rectify"].setdefault("fg_threshold", edge_thresh)
 
     results: Dict[str, List[Dict[str, Any]]] = {}
     for name, rgb in images.items():
@@ -741,6 +970,107 @@ def _plot_tile_selection(
         f"{len(kept)} kept / {len(discarded)} discarded",
         fontsize=13, fontweight="bold",
     )
+    plt.show()
+
+
+def _draw_centroid_overlay(
+    ax: "plt.Axes",
+    tile: np.ndarray,
+    fg_threshold: float,
+    title: str,
+    border_color: str,
+) -> None:
+    """Show a tile with its equator and top->bottom half-centroid line.
+
+    The yellow centroid line makes the contour's tilt (and therefore the
+    effect of the rotation correction) legible at a glance: it is slanted on
+    the raw tile and vertical on the rectified one.
+
+    Args:
+        ax: Matplotlib Axes to draw onto.
+        tile: Single-channel ``uint8`` tile crop.
+        fg_threshold: Foreground threshold used to locate the contour.
+        title: Axes title.
+        border_color: Spine colour, used to colour-code raw vs corrected.
+
+    Side effects:
+        Draws onto ``ax`` in place.
+    """
+    ax.imshow(tile, cmap="gray", vmin=0, vmax=255)
+    c_top, c_bot, equator = _half_centroids(tile.astype(np.float64), fg_threshold)
+    ax.axhline(equator, color="cyan", lw=1, ls="--")
+    ax.plot([c_top[0], c_bot[0]], [c_top[1], c_bot[1]],
+            "-", color="yellow", lw=1.5)
+    ax.plot(*c_top, "o", color="red", ms=5)
+    ax.plot(*c_bot, "o", color="deepskyblue", ms=5)
+    ax.set_title(title, fontsize=8)
+    ax.set_xticks([]); ax.set_yticks([])
+    for spine in ax.spines.values():
+        spine.set_edgecolor(border_color)
+        spine.set_linewidth(2.0)
+
+
+def _plot_rotation_translation_correction(
+    corrected: List[Dict[str, Any]],
+    fg_threshold: float,
+    seed: int,
+) -> None:
+    """Render the rotation/translation-correction diagnostic panel.
+
+    Draws a sample of up to :data:`N_RECTIFY_PREVIEW` kept tiles, each shown
+    side by side with its rectified counterpart, so the effect of the
+    centring and uprighting is directly visible. Two tile-pairs are packed
+    per row (4 columns); the raw tile carries an amber border and the
+    corrected tile a lime border.
+    """
+    rng = random.Random(seed)
+    sample = _sample(corrected, N_RECTIFY_PREVIEW, rng)
+    n = len(sample)
+
+    nrows = max(1, int(np.ceil(n / 2)))
+    fig, axes = plt.subplots(nrows, 4, figsize=(12, 3 * nrows))
+    axes = np.atleast_2d(axes)
+
+    for k, cand in enumerate(sample):
+        r, c0 = divmod(k, 2)
+        c0 *= 2  # each pair occupies two adjacent columns
+
+        raw, fixed = cand["content_raw"], cand["content"]
+        tx, ty = cand["shift"]
+        angle = cand["angle"]
+
+        _draw_centroid_overlay(
+            axes[r, c0], raw, fg_threshold,
+            title=f"#{cand['index']}  raw", border_color="orange",
+        )
+        # residual tilt of the rectified tile (should be ~0)
+        c_top, c_bot, _ = _half_centroids(fixed.astype(np.float64), fg_threshold)
+        residual = np.degrees(np.arctan2(c_top[0] - c_bot[0],
+                                         -(c_top[1] - c_bot[1])))
+        _draw_centroid_overlay(
+            axes[r, c0 + 1], fixed, fg_threshold,
+            title=(f"#{cand['index']}  corrected\n"
+                   f"shift ({tx:+.1f}, {ty:+.1f})  rot {angle:+.1f} deg\n"
+                   f"residual {residual:+.1f} deg"),
+            border_color="lime",
+        )
+
+    # blank any unused cells (odd sample count / short last row)
+    for cell in range(n, nrows * 2):
+        r, c0 = divmod(cell, 2)
+        c0 *= 2
+        for ax in (axes[r, c0], axes[r, c0 + 1]):
+            ax.set_facecolor("#eeeeee")
+            ax.text(0.5, 0.5, "n/a", ha="center", va="center",
+                    color="#999", transform=ax.transAxes)
+            ax.set_xticks([]); ax.set_yticks([])
+
+    fig.suptitle(
+        f"rotation_translation_correction  -  {n} kept tile(s): "
+        f"raw (amber) vs corrected (lime)",
+        fontsize=13, fontweight="bold",
+    )
+    fig.tight_layout(rect=(0, 0, 1, 0.97))
     plt.show()
 
 
