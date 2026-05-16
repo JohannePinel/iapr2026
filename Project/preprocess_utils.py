@@ -7,16 +7,23 @@ Core image-processing utilities for the UNO-card symbol-candidate pipeline.
 Pipeline (per image)
 --------------------
     RGB image
-        -> apply_threshold      : HSV-based white-background mask
-        -> apply_morphology     : speckle removal + contour smoothing
-        -> keep_edges           : Sobel edge map
-        -> tile_image           : sliding-window crops
-        -> tile_selection       : keep tiles with enough edge content
-                                  ("symbol candidates")
+        -> apply_threshold       : HSV-based white-background mask
+        -> apply_morphology      : speckle removal + contour smoothing
+        -> keep_edges            : Sobel edge map
+        -> tile_image            : sliding-window crops
+        -> remove_noise_contours : per-tile contour cleanup -- drop tiny and
+                                   frame-clipped contours  (contour_utils)
+        -> tile_selection        : keep tiles with enough edge content
+                                   ("symbol candidates")
 
 Every high-level step accepts ``show_plots: bool``. When True, the step emits
 a matplotlib diagnostic figure; when False it runs silently. Algorithms are
 decoupled from plotting -- the plotting helpers are kept private (``_plot_*``).
+
+Stage parameters reach the per-image chain through ``preprocess_image``'s
+``**overrides``. Routing of those kwargs to each stage is driven by a single
+table, :data:`_STAGE_PARAMS`, so adding or moving a parameter is a one-line
+change.
 """
 
 from __future__ import annotations
@@ -29,6 +36,7 @@ import cv2
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import numpy as np
+from contour_utils import remove_noise_contours
 
 
 # ============================================================================
@@ -54,14 +62,21 @@ DEFAULT_SMOOTH_KSIZE  = 5   # Gaussian-then-rethreshold contour smoothing
 DEFAULT_SOBEL_KSIZE = 3
 
 # --- tiling geometry ---
-DEFAULT_TILE_SIZE = 75
+DEFAULT_TILE_SIZE = 99
 DEFAULT_OVERLAP   = 2.0 / 3.0
 
 # --- tile selection ---
 DEFAULT_EDGE_THRESH    = 20      # pixel intensity above which a Sobel pixel
                                  # counts as an edge
-DEFAULT_EDGE_KEEP_FRAC = 0.10    # keep a tile if its edge-pixel fraction
+DEFAULT_EDGE_KEEP_FRAC = 0.03    # keep a tile if its edge-pixel fraction
                                  # is at least this much
+
+# --- noise removal (per-tile contour cleanup) ---
+# The numeric defaults for `min_pixels` / `edge_margin` live with the
+# algorithm in ``contour_utils.remove_noise_contours`` (single source of
+# truth -- not duplicated here). `fg_threshold` is special: it decides which
+# tile pixels count as "edge", so by default ``preprocess_image`` ties it to
+# DEFAULT_EDGE_THRESH to stay consistent with tile_selection.
 
 # --- diagnostic panel sampling ---
 N_KEPT_PREVIEW      = 15
@@ -298,6 +313,10 @@ def tile_image(
                 ],
             }
 
+        This is exactly the structure :func:`remove_noise_contours` accepts,
+        so it can be cleaned in place before being handed to
+        :func:`tile_selection`.
+
     Raises:
         ValueError: If ``overlap`` is outside ``[0, 1)``.
     """
@@ -362,7 +381,8 @@ def tile_selection(
     regardless of ``show_plots``.
 
     Args:
-        tiles: The dict returned by :func:`tile_image`.
+        tiles: The dict returned by :func:`tile_image` (optionally already
+            passed through :func:`remove_noise_contours`).
         edge_thresh: Pixel intensity above which a Sobel pixel counts as an
             edge.
         edge_keep_frac: Minimum edge-pixel fraction for a tile to be kept,
@@ -432,6 +452,75 @@ def tile_selection(
 # ============================================================================
 # 6. PIPELINE ORCHESTRATOR
 # ============================================================================
+# Which override keys belong to which stage. This is the single source of
+# truth for kwarg routing: `_split_overrides` reads it to fan a flat
+# `**overrides` dict out into per-stage bundles, and it also defines the set
+# of *accepted* override names (so typos can be rejected instead of silently
+# ignored). To expose a new stage parameter, add its name here -- nothing
+# else in the orchestrator needs to change.
+_STAGE_PARAMS: Dict[str, List[str]] = {
+    "threshold": ["sat_max", "val_min"],
+    "morph":     ["median_ksize", "open_ksize", "close_ksize",
+                  "min_blob_area", "smooth_ksize"],
+    "edges":     ["ksize"],
+    "tile":      ["tile_size", "overlap"],
+    "noise":     ["min_pixels", "edge_margin", "fg_threshold"],
+    "selection": ["edge_thresh", "edge_keep_frac", "seed"],
+}
+
+
+def _split_overrides(overrides: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+    """Route a flat ``**overrides`` dict into per-stage kwarg bundles.
+
+    Returns a dict ``{stage_name: {param: value, ...}}`` covering every stage
+    in :data:`_STAGE_PARAMS` (bundles for stages with no overrides are empty).
+
+    Raises:
+        TypeError: If ``overrides`` contains a key that is not a recognised
+            stage parameter -- this turns a silently-ignored config typo into
+            an immediate, explanatory error.
+    """
+    known = {key for keys in _STAGE_PARAMS.values() for key in keys}
+    unknown = set(overrides) - known
+    if unknown:
+        raise TypeError(
+            f"preprocess_image got unexpected override(s): {sorted(unknown)}. "
+            f"Accepted overrides: {sorted(known)}."
+        )
+    return {stage: _pick(overrides, keys)
+            for stage, keys in _STAGE_PARAMS.items()}
+
+
+def _preprocess_one(
+    name: str,
+    rgb: np.ndarray,
+    stage_kw: Dict[str, Dict[str, Any]],
+    show_plots: bool,
+) -> List[Dict[str, Any]]:
+    """Run the full stage chain on a single RGB image.
+
+    This is the per-image worker behind :func:`preprocess_image`: the batch
+    loop lives in the orchestrator, the actual stage sequence lives here, so
+    the chain can be read (or reused / tested) on its own.
+
+    Args:
+        name: Identifier for the image, used only in console output.
+        rgb: ``uint8`` RGB image of shape ``(H, W, 3)``.
+        stage_kw: Per-stage kwarg bundles from :func:`_split_overrides`.
+        show_plots: Propagated to every stage that renders a figure.
+
+    Returns:
+        The image's ``symbol_candidates`` list (see :func:`tile_selection`).
+    """
+    print(f"\n=== preprocess_image: {name} ===")
+    mask    = apply_threshold(rgb,     show_plots=show_plots, **stage_kw["threshold"])
+    cleaned = apply_morphology(mask,   show_plots=show_plots, **stage_kw["morph"])
+    edges   = keep_edges(cleaned,      show_plots=show_plots, **stage_kw["edges"])
+    tiles   = tile_image(edges,                               **stage_kw["tile"])
+    tiles   = remove_noise_contours(tiles,                    **stage_kw["noise"])
+    return tile_selection(tiles,       show_plots=show_plots, **stage_kw["selection"])
+
+
 def preprocess_image(
     images: Dict[str, np.ndarray],
     show_plots: bool = True,
@@ -441,8 +530,15 @@ def preprocess_image(
 
     For each image, applies the chain:
     ``apply_threshold -> apply_morphology -> keep_edges -> tile_image
-    -> tile_selection``. The ``show_plots`` flag is propagated to every
-    stage.
+    -> remove_noise_contours -> tile_selection``. The ``show_plots`` flag is
+    propagated to every stage.
+
+    Note:
+        ``remove_noise_contours`` cleans each tile's ``content`` in place but
+        leaves ``tiles["source_image"]`` untouched -- the per-stage figure
+        from :func:`tile_selection` therefore shows the original (un-cleaned)
+        edge map as context, while the sampled-tile grid shows the cleaned
+        tiles. The reported ``edge_fraction`` reflects the cleaned tiles.
 
     Args:
         images: Mapping of ``{filename_or_id: rgb_image}``. ``rgb_image``
@@ -450,8 +546,13 @@ def preprocess_image(
         show_plots: If True, every stage of every image renders its
             diagnostic figure.
         **overrides: Optional keyword overrides for stage parameters. Any
-            of the named arguments of the underlying stage functions is
-            accepted; see those functions' docstrings.
+            parameter listed in :data:`_STAGE_PARAMS` is accepted; passing
+            an unrecognised name raises ``TypeError``. The noise-removal
+            parameters are ``min_pixels``, ``edge_margin`` and
+            ``fg_threshold`` (see ``contour_utils.remove_noise_contours``);
+            when ``fg_threshold`` is not given it defaults to the selection
+            stage's ``edge_thresh`` so both stages agree on what counts as
+            an edge pixel.
 
     Returns:
         Mapping ``{filename: symbol_candidates}`` where ``symbol_candidates``
@@ -461,26 +562,21 @@ def preprocess_image(
         Renders matplotlib figures when ``show_plots`` is True. Always
         prints per-image statistics from :func:`tile_selection`.
     """
-    # Split overrides per stage so each function only sees what it accepts.
-    threshold_kw  = _pick(overrides, ["sat_max", "val_min"])
-    morph_kw      = _pick(overrides, ["median_ksize", "open_ksize",
-                                      "close_ksize", "min_blob_area",
-                                      "smooth_ksize"])
-    edges_kw      = _pick(overrides, ["ksize"])
-    tile_kw       = _pick(overrides, ["tile_size", "overlap"])
-    selection_kw  = _pick(overrides, ["edge_thresh", "edge_keep_frac", "seed"])
+    stage_kw = _split_overrides(overrides)
+
+    # Keep the noise step and tile_selection consistent: both decide what
+    # counts as an "edge" pixel. Unless the caller overrode `fg_threshold`,
+    # reuse the selection stage's `edge_thresh` for it.
+    stage_kw["noise"].setdefault(
+        "fg_threshold",
+        stage_kw["selection"].get("edge_thresh", DEFAULT_EDGE_THRESH),
+    )
 
     results: Dict[str, List[Dict[str, Any]]] = {}
     for name, rgb in images.items():
-        print(f"\n=== preprocess_image: {name} ===")
-        mask    = apply_threshold(rgb,  show_plots=show_plots, **threshold_kw)
-        cleaned = apply_morphology(mask, show_plots=show_plots, **morph_kw)
-        edges   = keep_edges(cleaned,    show_plots=show_plots, **edges_kw)
-        tiles   = tile_image(edges,                              **tile_kw)
-        candidates = tile_selection(
-            tiles, show_plots=show_plots, **selection_kw
+        results[name] = _preprocess_one(
+            name, rgb, stage_kw=stage_kw, show_plots=show_plots,
         )
-        results[name] = candidates
     return results
 
 
