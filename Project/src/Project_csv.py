@@ -142,6 +142,7 @@ def test_on_folder(folder_path, output_csv='test_results.csv', max_images=None, 
         
         
         img = mpimg.imread(str(img_path))
+        print("Image loaded:", img_path.name)
         
         # Détecter les masques de couleur
         color_masks = {

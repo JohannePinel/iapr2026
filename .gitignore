@@ -13,3 +13,5 @@ labs/
 *.log
 *.csv
 requirements.txt
+TODO.txt
+Results/

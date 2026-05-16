@@ -81,7 +81,9 @@ def display_img_with_contour(
     fig.suptitle(title, fontsize=20)
 
     plt.tight_layout()
-    plt.show()
+    #plt.show()
+    #remove to see figure
+    plt.close()
     
     
 def extract_hsv_channels(img):
@@ -269,6 +271,7 @@ def plot_interpolated_contours(
     color: str = "red",
     point_size: int = 10,
     linewidth: int = 2,
+    path = ""
 ):
     """
     Display interpolated contours on top of a mask image.
@@ -325,11 +328,13 @@ def plot_interpolated_contours(
     plt.gca().invert_yaxis()
     plt.axis("off")
     plt.title("Interpolated Contours")
-    plt.savefig(os.path.join("..", "Project/Rapport", "interpolated_contours_{}.png".format(datetime.now().strftime("%Y%m%d_%H%M%S"))))
-    plt.show()
+    plt.savefig(os.path.join(path, "interpolated_contours_{}.png".format(datetime.now().strftime("%Y%m%d_%H%M%S"))))
+    #plt.show()
+    #remove to see figure
+    plt.close()
     
     
-def find_contour_with_threshold(mask, arbitrary_minimal_area: int=1000, plot: bool = True):
+def find_contour_with_threshold(mask, arbitrary_minimal_area: int=1000, arbitrary_maximal_area: int=100000,plot: bool = True):
     '''     
     Find contours in a binary mask using OpenCV.
     Args:
@@ -350,7 +355,7 @@ def find_contour_with_threshold(mask, arbitrary_minimal_area: int=1000, plot: bo
 
     for c in contours:
         area = cv2.contourArea(c)
-        if area > arbitrary_minimal_area:
+        if area > arbitrary_minimal_area and area < arbitrary_maximal_area:
             large_contours.append(c)
             
     if plot:
@@ -363,45 +368,82 @@ def find_contour_with_threshold(mask, arbitrary_minimal_area: int=1000, plot: bo
 
         plt.figure(figsize=(10,8))
         plt.imshow(cv2.cvtColor(result, cv2.COLOR_BGR2RGB))
+        
         plt.savefig(os.path.join("..", "Project/Rapport", "contours_{}.png".format(datetime.now().strftime("%Y%m%d_%H%M%S"))))
-        plt.show()
+        #plt.show()
+        #remove to see figure
+        plt.close()
     return large_contours
 
 
 # FOR NOW I HAND SELECTED THE NBRE OF CONTOURS- USE THRESHOLD VALUE INSTEAD
 # try to change the selction with areamin = 20k and aspect ratio > 23 to remove leaves (careful for player!!)
-def relevant_contours_finder(mask,contours, contours_to_consider, infos_and_plot:bool=True):
+def relevant_contours_finder(mask,contours, contours_to_consider, infos_and_plot:bool=True, minimal_ar = 20, path=""):
     
     #calciulates aspect ratios for each contour
     aspect_ratios = [cv2.contourArea(cnt) / cv2.arcLength(cnt, True) if cv2.arcLength(cnt, True) > 0 else 0 for cnt in contours]
+    
     # Find indices of n largest aspect ratios
     number_of_contours = contours_to_consider if contours_to_consider < len(contours) else len(contours)
 
-    sorted_indices = np.argsort(aspect_ratios)[-number_of_contours:][::-1]  #merci chat
-    sorted_contours = [contours[i] for i in sorted_indices]
+    sorted_indices = np.argsort(aspect_ratios)[-number_of_contours:][::-1]
+
+    #keep only contours above minimal aspect ratio
+    filtered_indices = [i for i in sorted_indices if aspect_ratios[i] > minimal_ar]
+
+    sorted_contours = [contours[i] for i in filtered_indices]
 
     if infos_and_plot:
-        print(f"Aspect ratios of the top {number_of_contours} contours: {[aspect_ratios[i] for i in sorted_indices]}")
-        print("Aspect Ratios of the top contours:", [aspect_ratios[i] for i in sorted_indices])
-        print("Areas of top aspect ratio contours:", [cv2.contourArea(contours[i]) for i in sorted_indices])
+        print(f"Aspect ratios of the top {len(sorted_contours)} contours: {[aspect_ratios[i] for i in filtered_indices]}")
+        
+        print("Areas of top aspect ratio contours:", [cv2.contourArea(contours[i]) for i in filtered_indices])
+        
         result = mask.copy()
+        
         gray_image = (result * 255).astype(np.uint8)
+        
         result = cv2.cvtColor(gray_image, cv2.COLOR_GRAY2BGR)
 
         cv2.drawContours(result,sorted_contours,-1,(0, 0, 255),3)
 
+        # add simple index labels (0,1,2,...)
+        for idx, cnt in enumerate(sorted_contours):
+
+            M = cv2.moments(cnt)
+
+            if M["m00"] != 0:
+                cx = int(M["m10"] / M["m00"])
+                cy = int(M["m01"] / M["m00"])
+            else:
+                cx, cy = cnt[0][0]
+
+            cv2.putText(
+                result,
+                str(idx),
+                (cx, cy),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1,
+                (0, 255, 0),
+                2,
+                cv2.LINE_AA
+            )
+
         plt.figure(figsize=(10,8))
-        plt.title(f"Top {number_of_contours} contours with highest aspect ratio", fontsize=16)
-        plt.imshow(cv2.cvtColor(result, cv2.COLOR_BGR2RGB))
-        plt.savefig(os.path.join("..", "Project/Rapport", "top_contours_{}.png".format(datetime.now().strftime("%Y%m%d_%H%M%S"))))
-        plt.axis("off")
-        plt.show()
         
-    print("here")
+        plt.title(f"Top {len(sorted_contours)} contours with highest aspect ratio", fontsize=16)
+        
+        plt.imshow(cv2.cvtColor(result, cv2.COLOR_BGR2RGB))
+        
+
+        plt.savefig(os.path.join(path, "top_contours_{}.png".format(datetime.now().strftime("%Y%m%d_%H%M%S"))))
+        
+        plt.axis("off")
+        
+        #plt.show()
+        #remove to see figure
+        plt.close()
         
     return sorted_contours
-
-
 
 def merging_mask_calculator(contours, distances, min_distance_threshold=300, max_distance_threshold=350):
     '''
@@ -457,7 +499,7 @@ def merge_contours_from_mask(contours, merging_mask):
 
 
 
-def plot_bounding_boxes(mask,bounding_boxes,show_center=True,show_area=True,show_coordinates=True,figsize=(10, 8)):
+def plot_bounding_boxes(mask,bounding_boxes,show_center=True,show_area=True,show_coordinates=True,figsize=(10, 8), color_tested="None", path =""):
     """
     Plot rotated bounding boxes with labels.
 
@@ -468,6 +510,7 @@ def plot_bounding_boxes(mask,bounding_boxes,show_center=True,show_area=True,show
         - show_area: display rectangle area
         - show_coordinates: display center coordinates
         - figsize: matplotlib figure size
+        - path : path to save the image
     """
 
     # prepare image
@@ -509,6 +552,8 @@ def plot_bounding_boxes(mask,bounding_boxes,show_center=True,show_area=True,show
         if show_area:
             area = int(w * h)
             labels.append(f"A={area}")
+            
+        labels.append(f"Tested: {color_tested}")
 
         label_text = " | ".join(labels)
 
@@ -518,7 +563,7 @@ def plot_bounding_boxes(mask,bounding_boxes,show_center=True,show_area=True,show
             label_text,
             (center_x + 10, center_y - 10),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.5,
+            2,
             (255, 255, 255),
             2,
             cv2.LINE_AA
@@ -526,9 +571,116 @@ def plot_bounding_boxes(mask,bounding_boxes,show_center=True,show_area=True,show
 
     # display
     plt.figure(figsize=figsize)
-
+    plt.title("Original mask with bounding boxes")
     plt.imshow(cv2.cvtColor(result, cv2.COLOR_BGR2RGB))
-
     plt.axis("off")
+    plt.savefig(os.path.join(path, "bounding_boxes_{}.png".format(datetime.now().strftime("%Y%m%d_%H%M%S"))))
+    #plt.show()
+    #remove to see figure
+    plt.close()
 
-    plt.show()
+
+def compute_distance_matrix(contours):
+    N = contours.shape[0]
+    print(f"Number of contours: {N}")
+
+    distances = np.zeros((N, N))
+    for cnt in range(N):
+        for cnt2 in range(N):
+            if cnt != cnt2:
+                distances[cnt, cnt2] = np.mean(np.linalg.norm(contours[cnt] - contours[cnt2], axis=1))
+            else :
+                distances[cnt, cnt2] = np.inf        
+    return distances
+    
+    
+def merging_verifyer(contours, merging_mask, w,d, margin=10):
+    '''
+    arguments:
+        - contours: list of contours to merge  
+        - merging_mask: binary matrix indicating which contours were merged
+        - (w,d): width and depth that the bounding boxes should have to be considered valid
+    returns:
+        - verified_merged_contours: list of merged contours that are verified to be valid
+    '''
+    new_merging_mask = np.zeros_like(merging_mask)
+    merged_contour = []
+    for i in range(merging_mask.shape[0]):
+        for j in range(i+1, merging_mask.shape[1]):
+            if merging_mask[i, j]: #if these two contours were merged
+               # merge contour i and contour j
+                merged_contour = np.vstack((contours[i],contours[j]))
+                # OpenCV contour format
+                cnt_cv = merged_contour.astype(np.int32).reshape((-1, 1, 2))
+                #check bounding box
+                bbox = cv2.minAreaRect(cnt_cv)
+                bw, bh = bbox[1]
+                print("Box for ", i, " and ", j, "is ", bw, bh)
+                
+                if ((abs(bw - w) <= margin and abs(bh - d) <= margin) or (abs(bw - d) <= margin and abs(bh - w) <= margin)):                    
+                    new_merging_mask[i, j] = 1 #if valid, keep the merging
+                    new_merging_mask[j, i] = 1 #symmetric
+                    
+    return new_merging_mask
+
+
+
+def _is_rect_inside(rect_pts, outer_pts):
+    """
+    Check if rotated rectangle (rect_pts) is fully inside another polygon (outer_pts)
+    """
+    for p in rect_pts:
+        # pointPolygonTest: >= 0 means inside or on edge
+        if cv2.pointPolygonTest(outer_pts, (float(p[0]), float(p[1])), False) < 0:
+            return False
+    return True
+
+
+def remove_nested_contours(contours):
+    '''
+    Remove contours that are fully nested inside another contour.
+
+    Uses minAreaRect (oriented bounding boxes) for robustness.
+    '''
+
+    contours = [_clean_contour(c) for c in contours]
+    # Precompute rotated rectangles for all contours
+    rects = []
+    rect_pts_list = []
+
+    for cnt in contours:
+        rect = cv2.minAreaRect(cnt)
+        box = cv2.boxPoints(rect)
+        box = np.int32(box)
+        rects.append(rect)
+        rect_pts_list.append(box)
+
+    keep = [True] * len(contours)
+
+    for i in range(len(contours)):
+        for j in range(len(contours)):
+            if i == j:
+                continue
+
+            # if i is inside j → remove i
+            if _is_rect_inside(rect_pts_list[i], rect_pts_list[j]):
+                keep[i] = False
+                break
+
+    filtered_contours = [
+        cnt for cnt, k in zip(contours, keep) if k
+    ]
+
+    return filtered_contours
+
+
+def _clean_contour(cnt):
+    cnt = np.asarray(cnt)
+
+    # ensure correct dtype
+    cnt = cnt.astype(np.float32)
+
+    # ensure contiguous memory (important for OpenCV)
+    cnt = np.ascontiguousarray(cnt)
+
+    return cnt
