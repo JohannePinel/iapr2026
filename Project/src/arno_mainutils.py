@@ -73,8 +73,7 @@ def test_on_folder_contours(folder_path, output_csv='test_results.csv', output_f
             plot_thresholded_image(img=img,func=lambda img: mask,title=f"Combined detection in HSV space")
             contours = find_contour_with_threshold(mask, arbitrary_minimal_area=1000, arbitrary_maximal_area =35000, plot=True)
             contours_high_ar = relevant_contours_finder(mask, contours, contours_to_consider=20, infos_and_plot=True, minimal_ar = 18, path=img_output_path)
-            for cnt in contours_high_ar:
-                print("Area = ", cv2.contourArea(cnt))
+
             new_contours = [c.reshape(-1, 2) for c in contours_high_ar]
             contours_inter = linear_interpolation(new_contours, n_samples=25) #now a list of all contoues with N points each
             plot_interpolated_contours(mask,contours_inter, path=img_output_path)
@@ -94,9 +93,7 @@ def test_on_folder_contours(folder_path, output_csv='test_results.csv', output_f
             contours_all = contours_merged + unmerged_contours
             #remove contours which bboxes are fully inside other contour
             contours_all = [c.reshape(-1, 2) for c in contours_all]
-            print (f"Number of contours before removing nested: {len(contours_all)}")
-            for cnt in contours_all:
-                print(" Contour points:", cnt.shape)
+            #print (f"Number of contours before removing nested: {len(contours_all)}")
             contours_all = remove_nested_contours(contours_all)
             print (f"Total number of contours: {len(contours_all)}")
 
@@ -111,14 +108,26 @@ def test_on_folder_contours(folder_path, output_csv='test_results.csv', output_f
                     'contour': contour,
                     'color': color,
                     'bbox': bbox,
-                    'centroid': (bbox[0][0], bbox[0][1]),
+                    'centroid': (bbox[0][1], bbox[0][0]),
                     'area': bbox[1][0] * bbox[1][1],
                     'orientation': bbox[2],
                 }
                 all_cards.append(card_info)
                 
-            plot_bounding_boxes(mask=mask,bounding_boxes=bounding_boxes, color_tested=color, show_center=True, show_area=True, show_coordinates=True, figsize=(10, 8), path=img_output_path)
+            plot_bounding_boxes(mask=mask,bounding_boxes=bounding_boxes, color_tested=color, show_center=True, show_area=False, show_coordinates=True, figsize=(10, 8), path=img_output_path)
         
+       
+        for i, card in enumerate(all_cards):
+            color = card['color']
+            position = card['centroid']
+            angle = card['orientation']
+            
+            print(f"Card {i + 1}:")
+            print(f"  Color:    {color}")
+            print(f"  Position: {position}")
+            print(f"  Angle:    {angle}")
+            print("-" * 20)
+            
         small_objects = []
         center_card, player_cards, active_player = classify_by_position(all_cards, img.shape, small_objects) 
         

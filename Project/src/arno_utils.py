@@ -359,7 +359,7 @@ def find_contour_with_threshold(mask, arbitrary_minimal_area: int=1000, arbitrar
             large_contours.append(c)
             
     if plot:
-        print(f"Number of large contours: {len(large_contours)}")
+        #print(f"Number of large contours: {len(large_contours)}")
         result = mask.copy()
         gray_image = (result * 255).astype(np.uint8)
         result = cv2.cvtColor(gray_image, cv2.COLOR_GRAY2BGR)
@@ -394,9 +394,8 @@ def relevant_contours_finder(mask,contours, contours_to_consider, infos_and_plot
     sorted_contours = [contours[i] for i in filtered_indices]
 
     if infos_and_plot:
-        print(f"Aspect ratios of the top {len(sorted_contours)} contours: {[aspect_ratios[i] for i in filtered_indices]}")
-        
-        print("Areas of top aspect ratio contours:", [cv2.contourArea(contours[i]) for i in filtered_indices])
+        #print(f"Aspect ratios of the top {len(sorted_contours)} contours: {[aspect_ratios[i] for i in filtered_indices]}")
+        #print("Areas of top aspect ratio contours:", [cv2.contourArea(contours[i]) for i in filtered_indices])
         
         result = mask.copy()
         
@@ -538,7 +537,7 @@ def plot_bounding_boxes(mask,bounding_boxes,show_center=True,show_area=True,show
             cv2.circle(
                 result,
                 (center_x, center_y),
-                5,
+                10,
                 (255, 0, 0),
                 -1
             )
@@ -564,8 +563,8 @@ def plot_bounding_boxes(mask,bounding_boxes,show_center=True,show_area=True,show
             (center_x + 10, center_y - 10),
             cv2.FONT_HERSHEY_SIMPLEX,
             2,
-            (255, 255, 255),
-            2,
+            (255, 0, 0),
+            6,
             cv2.LINE_AA
         )
 
@@ -582,7 +581,7 @@ def plot_bounding_boxes(mask,bounding_boxes,show_center=True,show_area=True,show
 
 def compute_distance_matrix(contours):
     N = contours.shape[0]
-    print(f"Number of contours: {N}")
+    #print(f"Number of contours: {N}")
 
     distances = np.zeros((N, N))
     for cnt in range(N):
@@ -615,7 +614,7 @@ def merging_verifyer(contours, merging_mask, w,d, margin=10):
                 #check bounding box
                 bbox = cv2.minAreaRect(cnt_cv)
                 bw, bh = bbox[1]
-                print("Box for ", i, " and ", j, "is ", bw, bh)
+                #print("Box for ", i, " and ", j, "is ", bw, bh)
                 
                 if ((abs(bw - w) <= margin and abs(bh - d) <= margin) or (abs(bw - d) <= margin and abs(bh - w) <= margin)):                    
                     new_merging_mask[i, j] = 1 #if valid, keep the merging
