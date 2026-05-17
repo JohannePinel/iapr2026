@@ -679,3 +679,71 @@ def _clean_contour(cnt):
     cnt = np.ascontiguousarray(cnt)
 
     return cnt
+
+def main_detection(img, color_masks, img_output_path, verbose):
+    '''
+    Args:
+        img : original image
+        color_masks : all color masks
+        img_output_path
+        verbose : bool
+    Returns:
+        all_cards : list of all cards 
+    '''
+    all_cards = []
+    for color in color_masks:
+        if verbose:
+            print(" Color:", color)
+        mask = color_masks[color]
+        
+        if verbose:
+            plot_thresholded_image(img=img,func=lambda img: mask,title=f"Combined detection in HSV space")
+        contours = find_contour_with_threshold(mask, arbitrary_minimal_area=1000, arbitrary_maximal_area =50000, plot=verbose)
+        contours_high_ar = relevant_contours_finder(mask, contours, contours_to_consider=20, infos_and_plot=verbose, minimal_ar = 10, path=img_output_path)
+
+        new_contours = [c.reshape(-1, 2) for c in contours_high_ar]
+        contours_inter = linear_interpolation(new_contours, n_samples=25) #now a list of all contoues with N points each
+        if verbose :
+            plot_interpolated_contours(mask,contours_inter, path=img_output_path)
+        
+        distances = compute_distance_matrix(contours_inter)
+        merging_mask = merging_mask_calculator(contours_inter, distances, min_distance_threshold=250, max_distance_threshold=500)
+        #debug : pretty print mask
+        #print("Merging mask:")
+        #print(merging_mask)
+        tested_merging_mask = merging_verifyer(contours_inter, merging_mask, w=290, d=480, margin=40)
+        #print("Tested merging mask:")
+        #print(tested_merging_mask)
+        
+        contours_all = contours_inter
+        contours_merged = merge_contours_from_mask(contours_all, tested_merging_mask)
+        unmerged_contours = [contours_inter[i] for i in range(len(contours_inter)) if not tested_merging_mask[i].any()]
+        contours_all = contours_merged + unmerged_contours
+        #remove contours which bboxes are fully inside other contour
+        contours_all = [c.reshape(-1, 2) for c in contours_all]
+        #print (f"Number of contours before removing nested: {len(contours_all)}")
+        contours_all = remove_nested_contours(contours_all)
+        if verbose :
+            print (f"Total number of contours: {len(contours_all)}")
+
+        bounding_boxes = []
+
+        #get infos for each contour
+        for contour in contours_all:
+            cnt_cv = contour.astype(np.int32).reshape((-1, 1, 2)) #openCV contour format
+            bbox = cv2.minAreaRect(cnt_cv)
+            bounding_boxes.append(bbox)
+            card_info = {
+                'contour': contour,
+                'color': color,
+                'bbox': bbox,
+                'centroid': (bbox[0][1], bbox[0][0]),
+                'area': bbox[1][0] * bbox[1][1],
+                'orientation': bbox[2],
+                'value' : None,
+            }
+            all_cards.append(card_info)
+        if verbose :
+            plot_bounding_boxes(mask=mask,bounding_boxes=bounding_boxes, color_tested=color, show_center=True, show_area=False, show_coordinates=True, figsize=(10, 8), path=img_output_path)
+    return all_cards
+    

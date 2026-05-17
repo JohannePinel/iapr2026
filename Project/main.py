@@ -20,11 +20,12 @@ if __name__ == "__main__":
     )
     '''
     
-    all_cards = test_on_folder_contours(
+    all_cards = test_on_folder(
         folder_path=folder_path,
         output_csv=output_path_csv,
         output_folder=ouput_folder,
-        max_images=1  # Teste sur 1 images d'abord
+        max_images=2,  # Teste sur 1 images d'abord
+        verbose=False
     )
     
     

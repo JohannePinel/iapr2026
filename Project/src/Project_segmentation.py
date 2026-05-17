@@ -349,7 +349,7 @@ def group_cards_by_player(cards, image_shape, center_ratio=0.25):
 
     return players
 
-
+'''
 def main_detection(image, masks_dict):
 
   
@@ -376,5 +376,5 @@ def main_detection(image, masks_dict):
         
     
     return center_card, player_cards, all_cards, active_player
-
+'''
 
