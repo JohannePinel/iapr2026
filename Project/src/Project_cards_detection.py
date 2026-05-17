@@ -384,7 +384,6 @@ def relevant_contours_finder(mask,contours, contours_to_consider, infos_and_plot
     number_of_contours = contours_to_consider if contours_to_consider < len(contours) else len(contours)
 
     sorted_indices = np.argsort(aspect_ratios)[-number_of_contours:][::-1]
-
     #keep only contours above minimal aspect ratio
     filtered_indices = [i for i in sorted_indices if aspect_ratios[i] > minimal_ar]
 

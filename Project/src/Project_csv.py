@@ -244,8 +244,8 @@ def test_on_folder_contours(folder_path, output_csv='test_results.csv', output_f
             
 
             plot_thresholded_image(img=img,func=lambda img: mask,title=f"Combined detection in HSV space")
-            contours = find_contour_with_threshold(mask, arbitrary_minimal_area=1000, arbitrary_maximal_area =35000, plot=True)
-            contours_high_ar = relevant_contours_finder(mask, contours, contours_to_consider=20, infos_and_plot=True, minimal_ar = 18, path=img_output_path)
+            contours = find_contour_with_threshold(mask, arbitrary_minimal_area=1000, arbitrary_maximal_area =50000, plot=True)
+            contours_high_ar = relevant_contours_finder(mask, contours, contours_to_consider=20, infos_and_plot=True, minimal_ar = 10, path=img_output_path)
 
             new_contours = [c.reshape(-1, 2) for c in contours_high_ar]
             contours_inter = linear_interpolation(new_contours, n_samples=25) #now a list of all contoues with N points each
@@ -294,11 +294,13 @@ def test_on_folder_contours(folder_path, output_csv='test_results.csv', output_f
             color = card['color']
             position = card['centroid']
             angle = card['orientation']
+            area = card['area']
             
             print(f"Card {i + 1}:")
             print(f"  Color:    {color}")
             print(f"  Position: {position}")
             print(f"  Angle:    {angle}")
+            print(f"  Area:    {area} ")
             print("-" * 20)
             
         small_objects = []
