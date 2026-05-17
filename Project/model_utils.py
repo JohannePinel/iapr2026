@@ -52,6 +52,7 @@ __all__ = [
     "save_dataset_to",
     "show_dataset",
     "prepare_training_dataset",
+    "data_augmentation",
 ]
 
 
@@ -631,8 +632,364 @@ def prepare_training_dataset(csv_path: str,
 
 
 # ===========================================================================
-# Augmentation        (to be appended)
+# Data augmentation
 # ===========================================================================
+# Each augmentation step is a small pure function with the uniform signature
+#   step(img, rng, np_rng, demo) -> PIL.Image
+# `rng`/`np_rng` are the seeded RNGs; `demo=True` forces a visible, deterministic
+# variant for the `show_result` preview (instead of rolling the random branch).
+# `data_augmentation` chains the enabled steps to top each class up to `count`.
+
+def _fill_color(img: Image.Image):
+    """Background fill (black) matching the image's mode (scalar or tuple)."""
+    if img.mode in ("L", "I", "F"):
+        return 0
+    return tuple([0] * len(img.getbands()))
+
+
+def _scale_contour(img: Image.Image, factor: float) -> Image.Image:
+    """Scale the tile's content by `factor`, keeping the canvas size fixed.
+
+    ``factor > 1`` zooms in (the enlarged image is centre-cropped back to the
+    original size); ``factor < 1`` zooms out (the shrunk image is centred on a
+    black canvas). The contour stays centred either way.
+    """
+    w, h = img.size
+    nw, nh = max(1, round(w * factor)), max(1, round(h * factor))
+    resized = img.resize((nw, nh), Image.BILINEAR)
+    if factor >= 1.0:
+        left, top = (nw - w) // 2, (nh - h) // 2
+        return resized.crop((left, top, left + w, top + h))
+    canvas = Image.new(img.mode, (w, h), _fill_color(img))
+    canvas.paste(resized, ((w - nw) // 2, (h - nh) // 2))
+    return canvas
+
+
+def _translate_contour(img: Image.Image, dx: float, dy: float) -> Image.Image:
+    """Shift the tile content by ``(dx, dy)`` px; vacated area filled black."""
+    return img.transform(img.size, Image.AFFINE, (1, 0, -dx, 0, 1, -dy),
+                         resample=Image.BILINEAR, fillcolor=_fill_color(img))
+
+
+def _jitter_and_noise(img: Image.Image, np_rng) -> Image.Image:
+    """Apply mild brightness/contrast jitter plus speckle + salt-and-pepper noise."""
+    arr = np.asarray(img).astype(np.float32)
+    arr *= np_rng.uniform(0.85, 1.15)                        # brightness
+    mean = arr.mean()
+    arr = (arr - mean) * np_rng.uniform(0.85, 1.15) + mean   # contrast
+    arr += np_rng.normal(0.0, 6.0, arr.shape)                # gaussian speckle
+    sp = np_rng.random(arr.shape[:2])                        # salt & pepper
+    arr[sp < 0.005] = 0.0
+    arr[sp > 0.995] = 255.0
+    return Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8), mode=img.mode)
+
+
+# ---- individual steps -----------------------------------------------------
+def _step_rotate180(img, rng, np_rng, demo):
+    """Rotate 180deg with probability 1/2 (demo: always rotate)."""
+    if demo or rng.random() < 0.5:
+        return img.rotate(180, resample=Image.BILINEAR, fillcolor=_fill_color(img))
+    return img
+
+
+def _step_rotate90(img, rng, np_rng, demo):
+    """Rotate +/-90deg: 1/3 clockwise, 1/3 counter-clockwise, 1/3 unchanged."""
+    r = 0.0 if demo else rng.random()                        # demo -> clockwise
+    if r < 1.0 / 3.0:
+        return img.rotate(-90, resample=Image.BILINEAR, fillcolor=_fill_color(img))
+    if r < 2.0 / 3.0:
+        return img.rotate(90, resample=Image.BILINEAR, fillcolor=_fill_color(img))
+    return img
+
+
+def _step_rotate10(img, rng, np_rng, demo):
+    """Rotate +/-10deg: 1/3 clockwise, 1/3 counter-clockwise, 1/3 unchanged."""
+    r = 0.0 if demo else rng.random()                        # demo -> clockwise
+    if r < 1.0 / 3.0:
+        return img.rotate(-10, resample=Image.BILINEAR, fillcolor=_fill_color(img))
+    if r < 2.0 / 3.0:
+        return img.rotate(10, resample=Image.BILINEAR, fillcolor=_fill_color(img))
+    return img
+
+
+def _step_scale(img, rng, np_rng, demo):
+    """Scale the contour by a uniform factor in ``[0.9, 1.1]`` (demo: 1.1)."""
+    factor = 1.1 if demo else rng.uniform(0.9, 1.1)
+    return _scale_contour(img, factor)
+
+
+def _step_translate(img, rng, np_rng, demo):
+    """Translate by a 0-5 px magnitude on each axis, random sign (demo: +5,+5)."""
+    if demo:
+        dx, dy = 5.0, 5.0
+    else:
+        dx = rng.choice((-1.0, 1.0)) * rng.uniform(0.0, 5.0)
+        dy = rng.choice((-1.0, 1.0)) * rng.uniform(0.0, 5.0)
+    return _translate_contour(img, dx, dy)
+
+
+def _step_jitter(img, rng, np_rng, demo):
+    """Apply brightness/contrast jitter plus speckle and salt-and-pepper noise."""
+    return _jitter_and_noise(img, np_rng)
+
+
+#: Ordered augmentation pipeline -- (toggle keyword, human label, step function).
+_AUG_STEPS = [
+    ("rotate_180deg", "rotate 180deg",   _step_rotate180),
+    ("rotate_90deg",  "rotate 90deg",    _step_rotate90),
+    ("rotate_10deg",  "rotate 10deg",    _step_rotate10),
+    ("scale",         "scale 0.9-1.1",   _step_scale),
+    ("translate",     "translate 0-5px", _step_translate),
+    ("jitter_noise",  "jitter + noise",  _step_jitter),
+]
+
+
+def _list_class_images(class_dir: str, ext: str):
+    """Return ``(originals, augmented)`` filename lists for one class folder.
+
+    Augmented files are recognised by the ``aug_`` filename prefix, so a
+    re-run can discard and regenerate them without ever consuming a previously
+    augmented image as if it were an original.
+    """
+    files = sorted(os.path.basename(p)
+                   for p in glob.glob(os.path.join(class_dir, f"*.{ext}")))
+    originals = [f for f in files if not f.startswith("aug_")]
+    augmented = [f for f in files if f.startswith("aug_")]
+    return originals, augmented
+
+
+def _resolve_augmented_paths(training_dir: str, output_dir: Optional[str]):
+    """Decide where the augmented copy of the training set should live.
+
+    The original ``training_dir`` is never written to -- augmentation always
+    runs on a fresh copy. Returns ``(copy_src, augmented_root, aug_class_root)``:
+
+    * ``copy_src``       -- the directory copied verbatim into the destination.
+    * ``augmented_root`` -- the ``augmented_train_set`` folder itself.
+    * ``aug_class_root`` -- the per-class root inside it (where augmentation runs
+      and the manifest is written).
+
+    Default layout (``output_dir is None``): the *parent* of ``training_dir``
+    -- i.e. the ``train_set`` folder produced by :func:`prepare_training_dataset`
+    -- is copied wholesale into an ``augmented_train_set`` folder created **next
+    to that ``train_set`` folder**. So::
+
+        <root>/train_set/training_set/<class>/      (original, untouched)
+        <root>/augmented_train_set/training_set/<class>/   (copy + augmented)
+
+    When ``training_dir`` has no parent (e.g. the bare default ``"training_set"``)
+    it is mirrored directly into a sibling ``augmented_train_set``. An explicit
+    ``output_dir`` overrides the ``augmented_root`` location entirely.
+    """
+    training_dir = os.path.normpath(training_dir)
+    train_set_folder = os.path.dirname(training_dir)      # the 'train_set' folder
+
+    if train_set_folder and train_set_folder not in (".", os.sep):
+        copy_src = train_set_folder
+        default_root = os.path.join(os.path.dirname(train_set_folder) or ".",
+                                    "augmented_train_set")
+        augmented_root = os.path.normpath(output_dir) if output_dir else default_root
+        aug_class_root = os.path.join(augmented_root,
+                                      os.path.basename(training_dir))
+    else:                                                 # no usable parent
+        copy_src = training_dir
+        default_root = os.path.join(".", "augmented_train_set")
+        augmented_root = os.path.normpath(output_dir) if output_dir else default_root
+        aug_class_root = augmented_root
+
+    src_abs, root_abs = os.path.abspath(copy_src), os.path.abspath(augmented_root)
+    if root_abs == src_abs or root_abs == os.path.abspath(training_dir):
+        raise ValueError("augmented destination must differ from the source; "
+                          "pass a distinct output_dir")
+    if root_abs.startswith(src_abs + os.sep):
+        raise ValueError("augmented destination must not sit inside the source "
+                          "training set; pass a distinct output_dir")
+    return copy_src, augmented_root, aug_class_root
+
+
+def data_augmentation(training_dir: str = "training_set",
+                      count: int = 200,
+                      rotate_180deg: bool = True,
+                      rotate_90deg: bool = True,
+                      rotate_10deg: bool = True,
+                      scale: bool = True,
+                      translate: bool = True,
+                      jitter_noise: bool = True,
+                      show_result: bool = True,
+                      seed: Optional[int] = None,
+                      ext: str = "png",
+                      output_dir: Optional[str] = None) -> str:
+    """Augment a copy of a ``training_set`` up to a minimum image count.
+
+    The original training set is **never modified**. Its parent ``train_set``
+    folder is copied wholesale into a new ``augmented_train_set`` folder created
+    next to it, and augmentation runs on that copy::
+
+        <root>/train_set/training_set/<class>/            (original, untouched)
+        <root>/augmented_train_set/training_set/<class>/   (copy + augmented)
+
+    For every class subfolder of the copy, augmented images are generated by
+    chaining the enabled transform steps until the class holds at least
+    ``count`` images (copied originals + augmented combined). Augmented files
+    carry an ``aug_`` prefix. The whole ``augmented_train_set`` folder is rebuilt
+    from scratch on each call, so the operation is idempotent.
+
+    Transform steps (each gated by its own keyword, all default ``True``):
+
+    * ``rotate_180deg`` -- rotate 180deg with probability 1/2.
+    * ``rotate_90deg``  -- 1/3 clockwise, 1/3 counter-clockwise, 1/3 unchanged.
+    * ``rotate_10deg``  -- 1/3 clockwise, 1/3 counter-clockwise, 1/3 unchanged.
+    * ``scale``         -- scale the contour by a uniform factor in [0.9, 1.1].
+    * ``translate``     -- shift 0-5 px (random sign) on each axis.
+    * ``jitter_noise``  -- brightness/contrast jitter + speckle / salt-pepper.
+
+    Args:
+        training_dir: Path to the original ``training_set`` folder (per-class
+            subfolders), as produced by :func:`prepare_training_dataset`. Read
+            only -- it is copied, not modified.
+        count: Minimum number of images per class after augmentation.
+        rotate_180deg, rotate_90deg, rotate_10deg, scale, translate,
+        jitter_noise: Per-step on/off toggles.
+        show_result: When True, display a preview with 2 before/after example
+            pairs for each enabled step.
+        seed: Optional RNG seed for reproducible augmentation.
+        ext: Image file extension of the tiles.
+        output_dir: Optional explicit path for the ``augmented_train_set``
+            folder. When ``None`` (default) it is created next to the source
+            ``train_set`` folder.
+
+    Returns:
+        The path to the augmented per-class root (the copied + augmented
+        ``training_set`` inside ``augmented_train_set``).
+
+    Note:
+        ``rotate_180deg`` and ``rotate_90deg`` are label-changing for the digit
+        classes (a quarter-turned digit is invalid). Disable them for
+        digit-bearing runs, or augment digit and symbol classes separately.
+    """
+    rng = random.Random(seed)
+    np_rng = np.random.RandomState(seed)
+
+    if not os.path.isdir(training_dir):
+        raise FileNotFoundError(f"training set not found: {training_dir}")
+
+    # ---- copy the original training set into augmented_train_set ----
+    copy_src, augmented_root, aug_class_root = _resolve_augmented_paths(
+        training_dir, output_dir)
+    if os.path.exists(augmented_root):
+        shutil.rmtree(augmented_root)            # fresh copy -> idempotent
+    shutil.copytree(copy_src, augmented_root)
+    if not os.path.isdir(aug_class_root):
+        raise FileNotFoundError(
+            f"expected class folders at {aug_class_root} after copy")
+
+    toggles = {
+        "rotate_180deg": rotate_180deg, "rotate_90deg": rotate_90deg,
+        "rotate_10deg": rotate_10deg, "scale": scale,
+        "translate": translate, "jitter_noise": jitter_noise,
+    }
+    enabled = [(key, label, fn) for key, label, fn in _AUG_STEPS if toggles[key]]
+
+    class_dirs = sorted(
+        d for d in os.listdir(aug_class_root)
+        if os.path.isdir(os.path.join(aug_class_root, d))
+    )
+
+    summary: List[Dict[str, Any]] = []
+    original_pool: List[str] = []          # paths used for the preview panel
+
+    for cls in class_dirs:
+        class_path = os.path.join(aug_class_root, cls)
+        originals, old_augmented = _list_class_images(class_path, ext)
+
+        # drop any stale augmented files carried over in the copy
+        for f in old_augmented:
+            os.remove(os.path.join(class_path, f))
+
+        original_pool += [os.path.join(class_path, f) for f in originals]
+
+        n_orig = len(originals)
+        need = max(0, count - n_orig)
+        generated = 0
+
+        if n_orig == 0:
+            print(f"  WARNING: class {cls!r} has no original images; skipped")
+        elif need == 0:
+            pass                            # already at/above target
+        elif not enabled:
+            print(f"  WARNING: all transforms disabled; class {cls!r} not "
+                  f"augmented ({n_orig}/{count})")
+        else:
+            for i in range(need):
+                src = rng.choice(originals)
+                img = Image.open(os.path.join(class_path, src))
+                for _key, _label, fn in enabled:
+                    img = fn(img, rng, np_rng, demo=False)
+                out_name = f"aug_{cls}_{i:05d}.{ext}"
+                img.save(os.path.join(class_path, out_name))
+                generated += 1
+
+        summary.append({"class": cls, "before": n_orig,
+                         "after": n_orig + generated, "generated": generated})
+
+    # ---- rebuild the manifest CSV (inside the augmented copy) ----
+    manifest: List[List[str]] = []
+    for cls in class_dirs:
+        class_path = os.path.join(aug_class_root, cls)
+        for f in sorted(os.path.basename(p)
+                        for p in glob.glob(os.path.join(class_path, f"*.{ext}"))):
+            manifest.append([f"{cls}/{f}", cls])
+    with open(os.path.join(aug_class_root, "training_labels.csv"),
+              "w", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["image_name", "label"])
+        writer.writerows(sorted(manifest))
+
+    # ---- console summary ----
+    print("data_augmentation")
+    print("-" * 50)
+    print(f"  source set     : {training_dir}  (untouched)")
+    print(f"  augmented set  : {aug_class_root}")
+    print(f"  target count   : {count} image(s) per class")
+    print(f"  enabled steps  : {[k for k, _, _ in enabled] or 'none'}")
+    print("  class          before  ->  after   (+generated)")
+    for s in summary:
+        print(f"    {s['class']:<14s}{s['before']:>5d}   -> {s['after']:>5d}   "
+              f"(+{s['generated']})")
+    total_gen = sum(s["generated"] for s in summary)
+    total_after = sum(s["after"] for s in summary)
+    print(f"  generated      : {total_gen} augmented image(s)")
+    print(f"  total on disk  : {total_after} image(s) across "
+          f"{len(class_dirs)} class(es)")
+    print("-" * 50)
+
+    # ---- per-step before/after preview ----
+    if show_result and enabled and original_pool:
+        import matplotlib.pyplot as plt        # lazy: keeps the module light
+
+        n_steps = len(enabled)
+        fig, axes = plt.subplots(n_steps, 4,
+                                 figsize=(4 * 2.4, n_steps * 2.7))
+        axes = np.atleast_2d(axes)
+        for row, (_key, label, fn) in enumerate(enabled):
+            for ex in range(2):
+                src = rng.choice(original_pool)
+                before = Image.open(src)
+                after = fn(before.copy(), rng, np_rng, demo=True)
+                axes[row, 2 * ex].imshow(np.asarray(before),
+                                         cmap="gray", vmin=0, vmax=255)
+                axes[row, 2 * ex].set_title(f"{label}\nbefore", fontsize=8)
+                axes[row, 2 * ex + 1].imshow(np.asarray(after),
+                                             cmap="gray", vmin=0, vmax=255)
+                axes[row, 2 * ex + 1].set_title(f"{label}\nafter", fontsize=8)
+            for col in range(4):
+                axes[row, col].axis("off")
+        fig.suptitle("data_augmentation -- per-step preview "
+                     "(2 before/after examples each)", fontsize=11)
+        fig.tight_layout(rect=(0, 0, 1, 0.97))
+        plt.show()
+
+    return aug_class_root
 
 
 # ===========================================================================
