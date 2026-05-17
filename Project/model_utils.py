@@ -41,6 +41,7 @@ import csv
 import glob
 import os
 import random
+import shutil
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 import numpy as np
@@ -50,6 +51,7 @@ from PIL import Image
 __all__ = [
     "save_dataset_to",
     "show_dataset",
+    "prepare_training_dataset",
 ]
 
 
@@ -409,6 +411,223 @@ def show_dataset(n: int = 20, show_labels: bool = True,
                  fontsize=11)
     fig.tight_layout()
     plt.show()
+
+
+# ===========================================================================
+# Training dataset preparation
+# ===========================================================================
+def _index_image_files(data_path: str) -> Dict[str, str]:
+    """Build a ``{filename: full_path}`` index of every image under ``data_path``.
+
+    Searches ``data_path`` recursively, so it works whether the images sit
+    directly in the folder or are split across subfolders (e.g. the
+    ``L10007xx`` / ``L10008xx`` / ``L10009xx`` layout of
+    ``classifier_candidates_dataset``). On a duplicate filename the first hit
+    (sorted order) wins.
+    """
+    index: Dict[str, str] = {}
+    exts = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
+    for path in sorted(glob.glob(os.path.join(data_path, "**", "*"),
+                                 recursive=True)):
+        if os.path.isfile(path) and os.path.splitext(path)[1].lower() in exts:
+            index.setdefault(os.path.basename(path), path)
+    return index
+
+
+def _read_label_csv(csv_path: str) -> List[Dict[str, str]]:
+    """Read an ``image_name,label`` CSV into a list of ``{name, label}`` dicts."""
+    with open(csv_path, newline="") as fh:
+        reader = csv.reader(fh)
+        header = next(reader, None)
+        if not header:
+            return []
+        img_col = _image_column_index(header)
+        label_col = next((i for i in range(len(header)) if i != img_col),
+                         len(header) - 1)
+        rows: List[Dict[str, str]] = []
+        for row in reader:
+            if len(row) > img_col and row[img_col]:
+                label = row[label_col] if len(row) > label_col else ""
+                rows.append({"name": row[img_col], "label": label.strip()})
+    return rows
+
+
+def _resolve_target_counts(by_label: Dict[str, List[str]],
+                           class_distribution: Optional[Dict[str, int]]
+                           ) -> Dict[str, int]:
+    """Decide how many images to draw per class.
+
+    * ``class_distribution is None`` -> **even**: every class contributes the
+      same number of images, equal to the size of the smallest class (a fully
+      balanced set, no oversampling).
+    * ``class_distribution`` given -> a ``{label: count}`` request; only the
+      listed labels are included, and any count above what is available is
+      capped (with a warning).
+    """
+    if class_distribution is None:
+        per_class = min(len(v) for v in by_label.values()) if by_label else 0
+        return {label: per_class for label in by_label}
+
+    targets: Dict[str, int] = {}
+    for label, requested in class_distribution.items():
+        available = len(by_label.get(label, []))
+        if available == 0:
+            print(f"  WARNING: requested class {label!r} has no images; skipped")
+            continue
+        if requested > available:
+            print(f"  WARNING: class {label!r} requested {requested} "
+                  f"but only {available} available; capped at {available}")
+        targets[label] = min(int(requested), available)
+    return targets
+
+
+def prepare_training_dataset(csv_path: str,
+                             data_path: str,
+                             output_path: str,
+                             class_distribution: Optional[Dict[str, int]] = None,
+                             show_data: bool = True,
+                             exclude_classes: Sequence[str] = ("discard",),
+                             seed: Optional[int] = None) -> str:
+    """Assemble a labelled ``training_set`` with a chosen class distribution.
+
+    Reads a labelled CSV, locates each image under ``data_path``, samples them
+    according to ``class_distribution`` (even by default), and copies the
+    selection into ``<output_path>/training_set/<label>/`` -- the per-class
+    folder layout consumed by Keras ``image_dataset_from_directory`` / PyTorch
+    ``ImageFolder``. A ``training_labels.csv`` manifest is written alongside.
+
+    The ``discard`` class (and any other name in ``exclude_classes``), as well
+    as rows with an empty label, are ignored -- they never enter the training
+    set.
+
+    ``training_set`` is rebuilt from scratch on every call (it is a derived,
+    regenerable artifact), so the operation is idempotent and a re-run with a
+    different distribution leaves no stale files behind.
+
+    Args:
+        csv_path: CSV with ``image_name,label`` columns.
+        data_path: Directory searched (recursively) for the image files named
+            in the CSV.
+        output_path: Directory in which the ``training_set`` subfolder is
+            created.
+        class_distribution: ``{label: count}`` mapping for a custom mix, or
+            ``None`` (default) for an even split -- every class contributes as
+            many images as the smallest class has.
+        show_data: When True, display 20 sampled training images in a grid,
+            each captioned with its label.
+        exclude_classes: Class names to drop entirely (default ``("discard",)``).
+        seed: Optional RNG seed for a reproducible sample.
+
+    Returns:
+        The path to the created ``training_set`` directory.
+    """
+    rng = random.Random(seed)
+    excluded = {c.strip().lower() for c in exclude_classes}
+
+    # ---- read labels, group by class (dropping excluded / unlabelled) ----
+    rows = _read_label_csv(csv_path)
+    by_label: Dict[str, List[str]] = {}
+    n_excluded = n_unlabelled = 0
+    for row in rows:
+        label = row["label"]
+        if not label:
+            n_unlabelled += 1
+            continue
+        if label.lower() in excluded:
+            n_excluded += 1
+            continue
+        by_label.setdefault(label, []).append(row["name"])
+
+    if not by_label:
+        raise ValueError("no usable labelled rows after excluding "
+                          f"{sorted(excluded)} and unlabelled images")
+
+    # ---- locate the image files on disk ----
+    file_index = _index_image_files(data_path)
+
+    # ---- decide per-class counts, then sample ----
+    targets = _resolve_target_counts(by_label, class_distribution)
+
+    selection: List[Dict[str, str]] = []   # {name, label, src}
+    missing: List[str] = []
+    for label, count in targets.items():
+        names = [n for n in by_label.get(label, []) if n in file_index]
+        missing += [n for n in by_label.get(label, []) if n not in file_index]
+        k = min(count, len(names))
+        for name in rng.sample(names, k):
+            selection.append({"name": name, "label": label,
+                              "src": file_index[name]})
+
+    # ---- (re)build the training_set folder tree ----
+    training_root = os.path.join(output_path, "training_set")
+    if os.path.isdir(training_root):
+        shutil.rmtree(training_root)
+    os.makedirs(training_root, exist_ok=True)
+
+    manifest: List[List[str]] = []
+    for item in selection:
+        class_dir = os.path.join(training_root, item["label"])
+        os.makedirs(class_dir, exist_ok=True)
+        dst = os.path.join(class_dir, item["name"])
+        shutil.copy2(item["src"], dst)
+        manifest.append([os.path.join(item["label"], item["name"]),
+                         item["label"]])
+
+    manifest.sort()
+    with open(os.path.join(training_root, "training_labels.csv"),
+              "w", newline="") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(["image_name", "label"])
+        writer.writerows(manifest)
+
+    # ---- console summary ----
+    final_dist: Dict[str, int] = {}
+    for item in selection:
+        final_dist[item["label"]] = final_dist.get(item["label"], 0) + 1
+
+    mode = "even" if class_distribution is None else "custom"
+    print("prepare_training_dataset")
+    print("-" * 50)
+    print(f"  source csv     : {csv_path}")
+    print(f"  training root  : {training_root}")
+    print(f"  distribution   : {mode}")
+    print(f"  excluded class : {sorted(excluded)}  "
+          f"({n_excluded} image(s) dropped)")
+    if n_unlabelled:
+        print(f"  unlabelled     : {n_unlabelled} image(s) dropped")
+    print("  class counts   :")
+    for label in sorted(final_dist):
+        print(f"    {label:<16s}: {final_dist[label]}")
+    print(f"  total selected : {len(selection)} image(s) "
+          f"across {len(final_dist)} class(es)")
+    if missing:
+        print(f"  WARNING        : {len(missing)} CSV image(s) not found "
+              f"under {data_path!r} and skipped")
+    print("-" * 50)
+
+    # ---- optional 20-image preview grid ----
+    if show_data and selection:
+        import matplotlib.pyplot as plt        # lazy: keeps the module light
+
+        sample = rng.sample(selection, min(20, len(selection)))
+        n_cols = min(5, len(sample))
+        n_rows = (len(sample) + n_cols - 1) // n_cols
+        fig, axes = plt.subplots(n_rows, n_cols,
+                                 figsize=(2.4 * n_cols, 2.7 * n_rows))
+        axes = np.atleast_1d(axes).ravel()
+        for ax, item in zip(axes, sample):
+            ax.imshow(np.asarray(Image.open(item["src"])),
+                      cmap="gray", vmin=0, vmax=255)
+            ax.set_title(item["label"], fontsize=8)
+            ax.axis("off")
+        for ax in axes[len(sample):]:
+            ax.axis("off")
+        fig.suptitle(f"training_set -- {len(sample)} sampled image(s)",
+                     fontsize=11)
+        fig.tight_layout()
+        plt.show()
+
+    return training_root
 
 
 # ===========================================================================
