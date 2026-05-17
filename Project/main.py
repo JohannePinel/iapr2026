@@ -1,4 +1,4 @@
-from src.arno_mainutils import test_on_folder_contours
+#from src.arno_mainutils import test_on_folder_contours
 from src.Project_plots import *
 from src.Project_segmentation import *
 from src.Project_csv import *

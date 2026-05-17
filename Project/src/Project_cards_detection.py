@@ -1,7 +1,3 @@
-#This file contains utils for contour detection
-#should ba added to a full source file 
-
-
 # LIBRAIRIES
 from skimage.color import rgb2hsv, rgb2gray
 from skimage.morphology import closing, opening, disk, remove_small_holes, remove_small_objects, binary_dilation, erosion
@@ -24,7 +20,7 @@ from sklearn.metrics import accuracy_score, f1_score
 import cv2
 
 
-
+'''
 def find_contour(images: np.ndarray): #from iapr lab2
     """
     Find the contours for the set of images
@@ -52,7 +48,7 @@ def find_contour(images: np.ndarray): #from iapr lab2
         contours[i] = contours[i][0][:, 0, :]
 
     return contours
-    
+
 
 
 def display_img_with_contour(
@@ -215,6 +211,7 @@ def find_area_by_type(
     return out_mask
 
 
+
 def combined_mask(img, color_masks):
 
     combined_mask = np.zeros_like(list(color_masks.values())[0])
@@ -222,7 +219,7 @@ def combined_mask(img, color_masks):
         combined_mask = combined_mask | mask
     return combined_mask
 
-
+'''  
 
 def linear_interpolation(contours: np.ndarray, n_samples: int = 11):
     """
