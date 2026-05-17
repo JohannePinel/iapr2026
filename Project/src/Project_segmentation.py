@@ -120,7 +120,7 @@ def apply_hsv_threshold_v2(img, mode="red"):
 
     if mode == "black":
         h_min, h_max = 0.0, 1.0  
-        s_min, s_max = 0.0, 0.6
+        s_min, s_max = 0.0, 0.5 #was 0.6
         v_min, v_max = 0.0, 0.4  
 
     img_th = (

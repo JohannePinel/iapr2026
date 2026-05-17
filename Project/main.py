@@ -24,8 +24,8 @@ if __name__ == "__main__":
         folder_path=folder_path,
         output_csv=output_path_csv,
         output_folder=ouput_folder,
-        max_images=2,  # Teste sur 1 images d'abord
-        verbose=False
+        max_images=3,  # Teste sur 1 images d'abord
+        verbose=True
     )
     
     

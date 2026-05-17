@@ -331,7 +331,7 @@ def plot_interpolated_contours(
     plt.close()
     
     
-def find_contour_with_threshold(mask, arbitrary_minimal_area: int=1000, arbitrary_maximal_area: int=100000,plot: bool = True):
+def find_contour_with_threshold(mask, arbitrary_minimal_area: int=1000, arbitrary_maximal_area: int=100000,save_plot: bool = False, display_plot=False):
     '''     
     Find contours in a binary mask using OpenCV.
     Args:
@@ -355,7 +355,7 @@ def find_contour_with_threshold(mask, arbitrary_minimal_area: int=1000, arbitrar
         if area > arbitrary_minimal_area and area < arbitrary_maximal_area:
             large_contours.append(c)
             
-    if plot:
+    if save_plot or display_plot:
         #print(f"Number of large contours: {len(large_contours)}")
         result = mask.copy()
         gray_image = (result * 255).astype(np.uint8)
@@ -366,16 +366,17 @@ def find_contour_with_threshold(mask, arbitrary_minimal_area: int=1000, arbitrar
         plt.figure(figsize=(10,8))
         plt.imshow(cv2.cvtColor(result, cv2.COLOR_BGR2RGB))
         
-        plt.savefig(os.path.join("..", "Project/Rapport", "contours_{}.png".format(datetime.now().strftime("%Y%m%d_%H%M%S"))))
-        #plt.show()
-        #remove to see figure
-        plt.close()
+        if save_plot:
+            plt.savefig(os.path.join("..", "Project/Rapport", "contours_{}.png".format(datetime.now().strftime("%Y%m%d_%H%M%S"))))
+            plt.close()
+        if display_plot:
+            plt.show()
     return large_contours
 
 
 # FOR NOW I HAND SELECTED THE NBRE OF CONTOURS- USE THRESHOLD VALUE INSTEAD
 # try to change the selction with areamin = 20k and aspect ratio > 23 to remove leaves (careful for player!!)
-def relevant_contours_finder(mask,contours, contours_to_consider, infos_and_plot:bool=True, minimal_ar = 20, path=""):
+def relevant_contours_finder(mask,contours, contours_to_consider, save_plot:bool=False,show_plot:bool=False, minimal_ar = 20, path=""):
     
     #calciulates aspect ratios for each contour
     aspect_ratios = [cv2.contourArea(cnt) / cv2.arcLength(cnt, True) if cv2.arcLength(cnt, True) > 0 else 0 for cnt in contours]
@@ -389,9 +390,9 @@ def relevant_contours_finder(mask,contours, contours_to_consider, infos_and_plot
 
     sorted_contours = [contours[i] for i in filtered_indices]
 
-    if infos_and_plot:
-        #print(f"Aspect ratios of the top {len(sorted_contours)} contours: {[aspect_ratios[i] for i in filtered_indices]}")
-        #print("Areas of top aspect ratio contours:", [cv2.contourArea(contours[i]) for i in filtered_indices])
+    if save_plot or show_plot:
+        print(f"Aspect ratios of the top {len(sorted_contours)} contours: {[aspect_ratios[i] for i in filtered_indices]}")
+        print("Areas of top aspect ratio contours:", [cv2.contourArea(contours[i]) for i in filtered_indices])
         
         result = mask.copy()
         
@@ -429,14 +430,14 @@ def relevant_contours_finder(mask,contours, contours_to_consider, infos_and_plot
         
         plt.imshow(cv2.cvtColor(result, cv2.COLOR_BGR2RGB))
         
-
-        plt.savefig(os.path.join(path, "top_contours_{}.png".format(datetime.now().strftime("%Y%m%d_%H%M%S"))))
-        
+        if save_plot:
+            plt.savefig(os.path.join(path, "top_contours_{}.png".format(datetime.now().strftime("%Y%m%d_%H%M%S"))))
+            plt.close()
         plt.axis("off")
-        
-        #plt.show()
+        if show_plot:
+            plt.show()
         #remove to see figure
-        plt.close()
+  
         
     return sorted_contours
 
@@ -680,6 +681,58 @@ def _clean_contour(cnt):
 
     return cnt
 
+
+
+def is_active_player_marker(contour, color, verbose):
+    """
+    Determines whether a contour corresponds to an active player marker
+    instead of a normal card.
+
+    arguments:
+        - contour: contour to test
+        - color: contour color
+        - yellow_max_aspect_ratio: threshold for yellow circular markers
+        - yellow_max_area: maximal area for yellow markers
+        - black_min_rectangularity: threshold for black rectangular markers
+        - black_max_area: maximal area for black markers
+
+    returns:
+        - True if contour is considered a player marker
+        - False otherwise
+    """
+
+    yellow_min_aspect_ratio=30.0
+    
+    black_min_rectangularity=0.75
+    black_min_area=40000
+    black_max_area=50000
+    
+    cnt_cv = contour.astype(np.int32).reshape((-1, 1, 2))
+    bbox = cv2.minAreaRect(cnt_cv)
+    bw, bh = bbox[1]
+    rect_area = bw * bh
+    contour_area = cv2.contourArea(cnt_cv)
+
+    # avoid division by zero
+    rectangularity = contour_area / rect_area if rect_area > 0 else 0
+    aspect_ratio = cv2.contourArea(contour) / cv2.arcLength(contour, True)
+
+    # Yellow marker -> circle-like object
+    if color == 'yellow':
+ 
+        if (aspect_ratio > yellow_min_aspect_ratio):
+
+            return True
+    # Black marker -> small rectangle
+    elif color == 'black':
+        print("Rect :  " ,rectangularity)
+        if (rectangularity > black_min_rectangularity and
+            rect_area < black_max_area and rect_area> black_min_area):
+
+            return True
+
+    return False
+
 def main_detection(img, color_masks, img_output_path, verbose):
     '''
     Args:
@@ -689,8 +742,10 @@ def main_detection(img, color_masks, img_output_path, verbose):
         verbose : bool
     Returns:
         all_cards : list of all cards 
+        player_card : same format as a card but its a list with a single element : the player
     '''
     all_cards = []
+    player_card = []
     for color in color_masks:
         if verbose:
             print(" Color:", color)
@@ -698,8 +753,8 @@ def main_detection(img, color_masks, img_output_path, verbose):
         
         if verbose:
             plot_thresholded_image(img=img,func=lambda img: mask,title=f"Combined detection in HSV space")
-        contours = find_contour_with_threshold(mask, arbitrary_minimal_area=1000, arbitrary_maximal_area =50000, plot=verbose)
-        contours_high_ar = relevant_contours_finder(mask, contours, contours_to_consider=20, infos_and_plot=verbose, minimal_ar = 10, path=img_output_path)
+        contours = find_contour_with_threshold(mask, arbitrary_minimal_area=14000, arbitrary_maximal_area =50000, save_plot=verbose, display_plot=False)
+        contours_high_ar = relevant_contours_finder(mask, contours, contours_to_consider=20, save_plot=verbose, show_plot=False, minimal_ar = 16, path=img_output_path)
 
         new_contours = [c.reshape(-1, 2) for c in contours_high_ar]
         contours_inter = linear_interpolation(new_contours, n_samples=25) #now a list of all contoues with N points each
@@ -727,12 +782,28 @@ def main_detection(img, color_masks, img_output_path, verbose):
             print (f"Total number of contours: {len(contours_all)}")
 
         bounding_boxes = []
-
-        #get infos for each contour
+        
         for contour in contours_all:
             cnt_cv = contour.astype(np.int32).reshape((-1, 1, 2)) #openCV contour format
             bbox = cv2.minAreaRect(cnt_cv)
             bounding_boxes.append(bbox)
+            
+            
+            # detect active player marker
+            if (color=='yellow' or color=='black') and len(player_card)==0:
+                if is_active_player_marker(contour, color, verbose):
+                    card = {
+                        'color': color,
+                        'bbox': bbox,
+                        'centroid': (bbox[0][1], bbox[0][0]),
+                        'area': bbox[1][0] * bbox[1][1],
+                        }
+                    player_card.append(card)
+                    if verbose :
+                        print("ACTIVE PLAYER FOUND : ", color)
+                    # skip adding to normal cards
+                    continue
+                
             card_info = {
                 'contour': contour,
                 'color': color,
@@ -743,7 +814,9 @@ def main_detection(img, color_masks, img_output_path, verbose):
                 'value' : None,
             }
             all_cards.append(card_info)
+           
+        
         if verbose :
             plot_bounding_boxes(mask=mask,bounding_boxes=bounding_boxes, color_tested=color, show_center=True, show_area=False, show_coordinates=True, figsize=(10, 8), path=img_output_path)
-    return all_cards
+    return all_cards, player_card
     

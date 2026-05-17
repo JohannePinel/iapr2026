@@ -244,7 +244,7 @@ def test_on_folder(folder_path, output_csv='test_results.csv', output_folder= 'n
         }
         #print("Color masks computed.")
         
-        all_cards  = main_detection(img, color_masks, img_output_path=img_output_path, verbose=verbose)
+        all_cards, player_card  = main_detection(img, color_masks, img_output_path=img_output_path, verbose=verbose)
         
         if verbose:
             for i, card in enumerate(all_cards):
@@ -260,9 +260,11 @@ def test_on_folder(folder_path, output_csv='test_results.csv', output_folder= 'n
                 print(f"  Area:    {area} ")
                 print("-" * 20)
             
-        small_objects = []
+        
         ### NICOLAS
-        center_card, player_cards, active_player = classify_by_position(all_cards, img.shape, small_objects) 
+        
+        #Attribute position to players
+        center_card, player_cards, active_player = classify_by_position(all_cards, img.shape, player_card) 
         
         # Créer la ligne de soumission
         row = create_submission_row(
